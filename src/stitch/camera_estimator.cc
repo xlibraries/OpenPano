@@ -37,9 +37,17 @@ void CameraEstimator::estimate_focal() {
       c.focal = focal;
     print_debug("Estimated focal: %lf\n", focal);
   } else {
-    print_debug("Cannot estimate focal. Will use a naive one.\n");
-    REP(i, n) // hack focal
-      cameras[i].focal = (shapes[i].w + shapes[i].h) * 0.5;
+    if (FOCAL_LENGTH > 0) {
+      // Use configured focal length (35mm equivalent) converted to pixels
+      // 43.266 = hypot(36, 24), the diagonal of 35mm film
+      print_debug("Cannot estimate focal. Using configured FOCAL_LENGTH=%.1f mm.\n", FOCAL_LENGTH);
+      REP(i, n)
+        cameras[i].focal = hypot(shapes[i].w, shapes[i].h) * (FOCAL_LENGTH / 43.266);
+    } else {
+      print_debug("Cannot estimate focal. Will use a naive one.\n");
+      REP(i, n)
+        cameras[i].focal = (shapes[i].w + shapes[i].h) * 0.5;
+    }
   }
 }
 

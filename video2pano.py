@@ -42,10 +42,14 @@ LAPLACIAN_RATIO_THRESHOLD = 0.4
 # Minimum fraction of frames that must pass sharpness check
 MIN_SHARPNESS_PASS_RATE = 0.08
 
+# Default 35mm-equivalent focal length for phones (most phone main cameras are 24-28mm)
+DEFAULT_FOCAL_LENGTH_MM = 26
+
 # --- Stitcher config template (tuned for video input) ---
+# All {placeholders} are substituted at runtime by generate_config()
 VIDEO_CONFIG_TEMPLATE = """\
-CYLINDER 0
-ESTIMATE_CAMERA 1
+CYLINDER {mode_cylinder}
+ESTIMATE_CAMERA {mode_estimate_camera}
 TRANS 0
 
 ORDERED_INPUT 1
@@ -53,16 +57,16 @@ CROP 1
 MAX_OUTPUT_SIZE 8000
 LAZY_READ 1
 
-FOCAL_LENGTH 28
+FOCAL_LENGTH {focal_length}
 
-SIFT_WORKING_SIZE 1200
-NUM_OCTAVE 5
+SIFT_WORKING_SIZE {sift_working_size}
+NUM_OCTAVE {num_octave}
 NUM_SCALE 7
 SCALE_FACTOR 1.4142135623
 GAUSS_SIGMA 1.4142135623
 GAUSS_WINDOW_FACTOR 4
 
-CONTRAST_THRES 1.5e-2
+CONTRAST_THRES {contrast_thres}
 JUDGE_EXTREMA_DIFF_THRES 1e-3
 EDGE_RATIO 12
 
@@ -77,7 +81,7 @@ DESC_INT_FACTOR 512
 
 MATCH_REJECT_NEXT_RATIO 0.8
 RANSAC_ITERATIONS 2500
-RANSAC_INLIER_THRES 4.5
+RANSAC_INLIER_THRES {ransac_inlier_thres}
 
 INLIER_IN_MATCH_RATIO 0.05
 INLIER_IN_POINTS_RATIO 0.02
@@ -170,6 +174,9 @@ def probe_video(video_path):
 
     codec = video_stream.get("codec_name", "unknown")
 
+    # Try to extract focal length from metadata (35mm equivalent)
+    focal_length_35mm = _extract_focal_length(video_path)
+
     info = {
         "path": os.path.abspath(video_path),
         "width": width, "height": height,
@@ -178,10 +185,40 @@ def probe_video(video_path):
         "total_frames": total_frames,
         "rotation": rotation,
         "codec": codec,
+        "focal_length_35mm": focal_length_35mm,
     }
-    logger.info("Video: %dx%d, %.1ffps, %.1fs, %d frames, rotation=%d",
-                width, height, fps, duration, total_frames, rotation)
+    logger.info("Video: %dx%d, %.1ffps, %.1fs, %d frames, rotation=%d, focal=%.1fmm (35mm equiv)",
+                width, height, fps, duration, total_frames, rotation,
+                focal_length_35mm or 0)
     return info
+
+
+def _extract_focal_length(video_path):
+    """Try to extract 35mm-equivalent focal length from video metadata.
+
+    Returns focal length in mm, or None if not found.
+    Uses ffprobe to check for common EXIF/QuickTime metadata tags.
+    """
+    try:
+        cmd = [
+            shutil.which("ffprobe"), "-v", "quiet", "-print_format", "json",
+            "-show_entries", "format_tags", video_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            tags = data.get("format", {}).get("tags", {})
+            # Check common metadata keys for focal length
+            for key in ("com.apple.quicktime.focal-length-35mm-equivalent",
+                        "focal_length_35mm", "FocalLengthIn35mmFormat"):
+                if key in tags:
+                    val = float(tags[key])
+                    if 10 < val < 200:  # sanity check
+                        logger.info("Found focal length from metadata: %.1fmm", val)
+                        return val
+    except Exception:
+        pass
+    return None
 
 
 # --- Frame extraction ---
@@ -330,11 +367,42 @@ def select_frames(scored_frames, min_frames=8, max_frames=80):
 
 # --- Config generation ---
 
-def generate_config(working_dir):
-    """Write config.cfg for the stitcher in working_dir."""
+def generate_config(working_dir, focal_length_mm=DEFAULT_FOCAL_LENGTH_MM,
+                    use_cylinder=False, video_width=1920, video_height=1080):
+    """Write config.cfg for the stitcher in working_dir.
+
+    Adapts SIFT and RANSAC parameters based on video resolution.
+    """
+    # SIFT_WORKING_SIZE must not exceed actual resolution (upscaling hurts feature detection)
+    max_dim = max(video_width, video_height)
+    sift_working_size = min(1200, max_dim)
+
+    # Scale RANSAC inlier threshold relative to working size (base: 3.5 at 800px)
+    ransac_inlier_thres = round(3.5 * sift_working_size / 800, 1)
+
+    # For low-res video, relax contrast threshold further to get enough features
+    if max_dim < 1000:
+        contrast_thres = "1e-2"
+        num_octave = 4  # fewer octaves for small images
+    else:
+        contrast_thres = "1.5e-2"
+        num_octave = 5
+
     config_path = os.path.join(working_dir, "config.cfg")
+    content = VIDEO_CONFIG_TEMPLATE.format(
+        mode_cylinder=1 if use_cylinder else 0,
+        mode_estimate_camera=0 if use_cylinder else 1,
+        focal_length=focal_length_mm,
+        sift_working_size=sift_working_size,
+        num_octave=num_octave,
+        contrast_thres=contrast_thres,
+        ransac_inlier_thres=ransac_inlier_thres,
+    )
     with open(config_path, "w") as f:
-        f.write(VIDEO_CONFIG_TEMPLATE)
+        f.write(content)
+    logger.info("Config: %s mode, focal=%.1fmm, sift_size=%d, ransac_thres=%.1f",
+                "CYLINDER" if use_cylinder else "ESTIMATE_CAMERA",
+                focal_length_mm, sift_working_size, ransac_inlier_thres)
     return config_path
 
 
@@ -415,7 +483,8 @@ def run_stitcher(stitcher_binary, frame_paths, working_dir, min_connected=8):
 # --- Main pipeline ---
 
 def process_video(video_path, output_dir=None, project_root=None,
-                  min_frames=8, max_frames=80, keep_frames=False):
+                  min_frames=8, max_frames=80, keep_frames=False,
+                  focal_length=None):
     """Main pipeline: video -> frames -> score -> select -> stitch -> panorama.
 
     Returns a complete result dict suitable for JSON serialization.
@@ -470,13 +539,48 @@ def process_video(video_path, output_dir=None, project_root=None,
             quality["mean_laplacian"] = round(sum(laplacian_values) / len(laplacian_values), 1)
             quality["min_laplacian_selected"] = round(min(laplacian_values), 1)
 
-        # 5. Generate config
-        generate_config(output_dir)
+        # 5. Determine focal length (CLI override > metadata > default)
+        focal_mm = focal_length or video_info.get("focal_length_35mm") or DEFAULT_FOCAL_LENGTH_MM
+        quality["focal_length_35mm"] = focal_mm
+        quality["focal_source"] = ("metadata" if video_info.get("focal_length_35mm")
+                                   else "default")
 
-        # 6. Run stitcher
+        # 6. Stitch — strategy depends on whether we know the focal length.
+        #    Known focal: try CYLINDER first (flat projection, needs accurate focal),
+        #    Unknown focal: try ESTIMATE_CAMERA first (can estimate focal internally).
         t0 = time.time()
-        stitch_result = run_stitcher(stitcher_binary, selected_paths, output_dir,
-                                     min_connected=min_frames)
+        stitch_result = None
+        stitch_mode = None
+        focal_known = quality["focal_source"] == "metadata" or focal_length is not None
+        vw, vh = video_info["width"], video_info["height"]
+        # If video is rotated, effective dims are swapped
+        if abs(video_info["rotation"]) in (90, 270):
+            vw, vh = vh, vw
+
+        config_kwargs = dict(focal_length_mm=focal_mm, video_width=vw, video_height=vh)
+
+        if focal_known:
+            modes_to_try = [("cylinder", True), ("estimate_camera", False)]
+        else:
+            modes_to_try = [("estimate_camera", False), ("cylinder", True)]
+
+        for mode_name, use_cyl in modes_to_try:
+            generate_config(output_dir, use_cylinder=use_cyl, **config_kwargs)
+            try:
+                stitch_result = run_stitcher(stitcher_binary, selected_paths, output_dir,
+                                             min_connected=min_frames)
+                stitch_mode = mode_name
+                break
+            except StitcherError as e:
+                logger.warning("%s mode failed (%s), trying next mode...",
+                              mode_name.upper(), e.error_code)
+                out_file = os.path.join(output_dir, "out.jpg")
+                if os.path.exists(out_file):
+                    os.remove(out_file)
+
+        if stitch_result is None:
+            raise StitcherError("All stitching modes failed", "STITCH_FAILED")
+
         timings["stitch_seconds"] = round(time.time() - t0, 2)
 
         # 7. Move output to final location
@@ -509,6 +613,7 @@ def process_video(video_path, output_dir=None, project_root=None,
             "stitch": {
                 "final_size": stitch_result["final_size"],
                 "duration_seconds": stitch_result["duration_seconds"],
+                "mode": stitch_mode,
             },
             "warnings": warnings,
             "timing": timings,
@@ -536,6 +641,8 @@ def main():
     parser.add_argument("--project-root", help="OpenPano project root (default: script directory)")
     parser.add_argument("--min-frames", type=int, default=8, help="Minimum sharp frames required (default: 8)")
     parser.add_argument("--max-frames", type=int, default=80, help="Maximum frames to stitch (default: 80)")
+    parser.add_argument("--focal-length", type=float, default=None,
+                        help="Override 35mm-equivalent focal length in mm (default: auto-detect or 26)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep extracted frames after stitching")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output on stderr")
     args = parser.parse_args()
@@ -559,6 +666,7 @@ def main():
             min_frames=args.min_frames,
             max_frames=args.max_frames,
             keep_frames=args.keep_frames,
+            focal_length=args.focal_length,
         )
         exit_code = EXIT_SUCCESS
 

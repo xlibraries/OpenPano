@@ -180,8 +180,15 @@ void Stitcher::build_linear_simple() {
   if (not TRANS)    // the estimation method only works under fixed-center projection
     f = Camera::estimate_focal(pairwise_matches);
   if (f <= 0) {
-    print_debug("Cannot estimate focal. Will use a naive one.\n");
-    f = 0.5 * (imgs[mid].width() + imgs[mid].height());
+    if (FOCAL_LENGTH > 0) {
+      // Use configured focal length (35mm equivalent) converted to pixels
+      f = hypot(imgs[mid].width(), imgs[mid].height()) * (FOCAL_LENGTH / 43.266);
+      print_debug("Cannot estimate focal. Using configured FOCAL_LENGTH=%.1f mm (%.0f px).\n",
+                  FOCAL_LENGTH, f);
+    } else {
+      print_debug("Cannot estimate focal. Will use a naive one.\n");
+      f = 0.5 * (imgs[mid].width() + imgs[mid].height());
+    }
   }
   REP(i, n) {
     auto M = Homography{{
