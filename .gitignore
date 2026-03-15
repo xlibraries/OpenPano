@@ -4,6 +4,7 @@ main
 data/
 *.png
 *.zip
+*.jpg
 .tags
 output
 *.pyc

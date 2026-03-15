@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /Users/xlib/Documents/OpenPano/example-data/testvid/frames/*.jpg)",
+      "Read(//Users/xlib/Documents/OpenPano/**)",
+      "Bash(ls -la /Users/xlib/Documents/OpenPano/example-data/testvid/best/*.jpg)",
+      "Bash(python3 video2pano.py example-data/testvid/test.mp4 --output-dir ./pano_output --keep-frames)"
+    ]
+  }
+}
