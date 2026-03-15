@@ -111,46 +111,103 @@ $ make -C src
 
 ## Usage
 
+### Quick Start (generate.sh)
+
+The `generate.sh` script handles building and running the full pipeline:
+
+```bash
+# Build the C++ stitcher
+./generate.sh build
+
+# Convert a video to panorama
+./generate.sh stitch video.mp4 -o ./output --verbose
+
+# Stitch images directly
+./generate.sh stitch-images img1.jpg img2.jpg img3.jpg
+
+# See all options
+./generate.sh help
 ```
-$ ./image-stitching <file1> <file2> ...
+
+### Video to Panorama (video2pano.py)
+
+Automatically extracts frames from video, scores for quality/sharpness, selects the best frames, and stitches them:
+
+```bash
+# Basic usage
+python3 video2pano.py input.mp4
+
+# With output directory and verbose logging
+python3 video2pano.py input.mp4 -o ./results --verbose
+
+# Override focal length (35mm equivalent, in mm)
+python3 video2pano.py input.mp4 --focal-length 28
+
+# Keep extracted frames for inspection
+python3 video2pano.py input.mp4 -o ./results --keep-frames
+
+# Use a custom config file
+python3 video2pano.py input.mp4 -c my_config.conf
 ```
 
-The output file is ``out.jpg``. You can play with the [example data](https://github.com/ppwwyyxx/OpenPano/releases/tag/0.1) to start with.
+**Dependencies:** ffmpeg (frame extraction), Python 3.7+, OpenCV (optional, for Laplacian blur detection — falls back to file-size scoring if unavailable).
 
-Before dealing with very large images (4 megapixels or more), it's better to manually downscale them to save time.
+```bash
+# Install dependencies (macOS)
+brew install ffmpeg
+pip3 install opencv-python   # optional but recommended
+```
 
-In cylinder/translation mode, the input file names need to have the correct order.
+**Output:** JSON result on stdout, progress on stderr. Exit codes: 0=success, 1=quality too low, 2=input error, 3=stitcher error.
 
-### Configuration:
+The pipeline automatically:
+- Adapts SIFT parameters for the video's resolution
+- Detects and rejects blurry frames (file size + Laplacian variance)
+- Selects optimally-spaced sharp frames
+- Tries the best stitching mode (ESTIMATE_CAMERA for unknown focal length, CYLINDER when focal is known)
+- Falls back to alternate mode if the first fails
+- Retries with a connected subset if the frame chain breaks
 
-The program expects to find the config file `config.cfg` in the working directory.
-Three modes are available (set/unset them in the top of the config file):
-+ __cylinder__ mode. Requirements:
-	+ You stay at the same spot and __only__ turn left (or right) when taking the images (as is usually done), no
-		translations or other type of rotations allowed.
+### Configuration
+
+**`video2pano.conf`** — All tunable parameters for the video-to-panorama pipeline (quality thresholds, SIFT sensitivity, RANSAC, camera defaults). Edit this file to customize behavior. See comments in the file for details.
+
+**`config.cfg`** — Direct stitcher configuration (used when running `image-stitching` binary directly). The video2pano pipeline generates this automatically from `video2pano.conf`.
+
+### Stitching Images Directly
+
+```
+$ ./build/src/image-stitching <file1> <file2> ...
+```
+
+The output file is ``out.jpg``. The program reads `config.cfg` from the working directory. You can play with the [example data](https://github.com/ppwwyyxx/OpenPano/releases/tag/0.1) to start with.
+
+Before dealing with very large images (4 megapixels or more), it's better to manually downscale them to save time. In cylinder/translation mode, the input file names need to have the correct order.
+
+### Stitching Modes
+
+Three modes are available (set in config):
+
++ __cylinder__ mode. Best quality for horizontal pans with known focal length.
+	+ You stay at the same spot and __only__ turn left (or right), no translations.
 	+ Images are taken with the same camera, with a known ``FOCAL_LENGTH`` set in config.
-	+ Images are given in the left-to-right order. (I might fix this in the future)
+	+ Images are given in the left-to-right order.
 
-+ __camera estimation mode__. Requirements:
-  * You stay at the same spot when taking the images, and can turn your camera left-right or
-    up-down.
-  * Don't use too few images.
-  * It runs slower because it needs to perform pairwise matches.
++ __camera estimation__ mode. Most flexible, works with arbitrary rotation.
+  * You stay at the same spot, can turn left-right or up-down.
+  * Don't use too few images. Runs slower (pairwise matching).
 
-+ __translation mode__. Simply stitch images together by affine transformation. Requirements:
-  * Camera performs pure translation.
-  * The images are roughly at the same depth.
-  * Input images are ordered according to the translation movement.
++ __translation__ mode. For camera moving sideways (not rotating).
+  * Camera performs pure translation. Images at roughly the same depth.
+  * Input images ordered by translation direction.
 
-Some options you may care:
-+ __FOCAL_LENGTH__: focal length of your camera in [35mm equivalent](https://en.wikipedia.org/wiki/35_mm_equivalent_focal_length). Only useful in cylinder mode.
-+ __ORDERED_INPUT__: whether input images are ordered sequentially. has to be `1` in CYLINDER and TRANS mode.
+Key config options:
++ __FOCAL_LENGTH__: focal length in [35mm equivalent](https://en.wikipedia.org/wiki/35_mm_equivalent_focal_length). Used in cylinder mode and as fallback when camera estimation can't determine focal.
++ __ORDERED_INPUT__: whether input images are ordered sequentially. Must be `1` in CYLINDER and TRANS mode.
 + __CROP__: whether to crop the final image to avoid irregular white border.
 
-Other parameters are quality-related.
 The default values are generally good for images with more than 0.7 megapixels.
-If your images are too small and cannot produce satisfactory results,
-it might be better to resize your images rather than tune the parameters.
+If your images are too small, it might be better to resize them rather than tune parameters.
 
 
 ## Examples ([All original data available for __download__](https://github.com/ppwwyyxx/OpenPano/releases/tag/0.1))

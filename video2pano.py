@@ -14,6 +14,7 @@ Progress/debug info goes to stderr.
 """
 
 import argparse
+import configparser
 import json
 import logging
 import os
@@ -33,65 +34,164 @@ EXIT_INPUT_ERROR = 2
 EXIT_STITCHER_ERROR = 3
 EXIT_INTERNAL_ERROR = 4
 
-# --- Quality thresholds ---
-# At 1080p with JPEG quality 2, frames below this are too blurry for SIFT
-BASE_FILESIZE_THRESHOLD = 120_000  # bytes at 1920x1080
-BASE_RESOLUTION = 1920 * 1080
-# Laplacian variance: frames below this fraction of the median are rejected
-LAPLACIAN_RATIO_THRESHOLD = 0.4
-# Minimum fraction of frames that must pass sharpness check
-MIN_SHARPNESS_PASS_RATE = 0.08
 
-# Default 35mm-equivalent focal length for phones (most phone main cameras are 24-28mm)
-DEFAULT_FOCAL_LENGTH_MM = 26
+# --- Config loading ---
 
-# --- Stitcher config template (tuned for video input) ---
-# All {placeholders} are substituted at runtime by generate_config()
+def _default_config():
+    """Return a dict of all default config values."""
+    return {
+        "quality": {
+            "base_filesize_threshold": 120_000,
+            "base_resolution_pixels": 1920 * 1080,
+            "laplacian_ratio_threshold": 0.4,
+            "min_sharpness_pass_rate": 0.08,
+        },
+        "frames": {
+            "min_frames": 8,
+            "max_frames": 80,
+        },
+        "camera": {
+            "default_focal_length_mm": 26,
+        },
+        "sift": {
+            "sift_working_size": 1200,
+            "num_octave_high_res": 5,
+            "num_octave_low_res": 4,
+            "low_res_threshold": 1000,
+            "num_scale": 7,
+            "scale_factor": 1.4142135623,
+            "gauss_sigma": 1.4142135623,
+            "gauss_window_factor": 4,
+            "contrast_thres_high_res": 1.5e-2,
+            "contrast_thres_low_res": 1e-2,
+            "judge_extrema_diff_thres": 1e-3,
+            "edge_ratio": 12,
+            "pre_color_thres": 2e-2,
+            "calc_offset_depth": 4,
+            "offset_thres": 0.5,
+        },
+        "matching": {
+            "ori_radius": 4.5,
+            "ori_hist_smooth_count": 2,
+            "desc_hist_scale_factor": 3,
+            "desc_int_factor": 512,
+            "match_reject_next_ratio": 0.8,
+        },
+        "ransac": {
+            "iterations": 2500,
+            "base_inlier_thres": 3.5,
+            "base_inlier_resolution": 800,
+            "inlier_in_match_ratio": 0.05,
+            "inlier_in_points_ratio": 0.02,
+        },
+        "optimization": {
+            "straighten": 1,
+            "slope_plain": 8e-3,
+            "lm_lambda": 5,
+            "multipass_ba": 1,
+        },
+        "output": {
+            "max_output_size": 8000,
+            "crop": 1,
+            "multiband": 0,
+        },
+    }
+
+
+def load_config(config_path=None):
+    """Load config from .conf file, falling back to defaults.
+
+    Returns a flat-ish namespace object for easy access: cfg["quality"]["base_filesize_threshold"]
+    """
+    cfg = _default_config()
+
+    if config_path is None:
+        # Look next to this script
+        config_path = os.path.join(os.path.dirname(__file__), "video2pano.conf")
+
+    if os.path.isfile(config_path):
+        logger.debug("Loading config from %s", config_path)
+        parser = configparser.ConfigParser()
+        parser.read(config_path)
+        for section in parser.sections():
+            if section not in cfg:
+                cfg[section] = {}
+            for key, raw_val in parser.items(section):
+                # Strip inline comments (everything after #)
+                val_str = raw_val.split("#")[0].strip()
+                # Auto-convert to int/float using the default value's type as hint
+                default_val = cfg.get(section, {}).get(key)
+                if isinstance(default_val, int) and not isinstance(default_val, bool):
+                    try:
+                        val = int(float(val_str))  # handles "2073600" and "1e6"
+                    except ValueError:
+                        val = val_str
+                elif isinstance(default_val, float):
+                    try:
+                        val = float(val_str)
+                    except ValueError:
+                        val = val_str
+                else:
+                    # No type hint — try float then int
+                    try:
+                        val = float(val_str)
+                        if val == int(val) and "." not in val_str and "e" not in val_str.lower():
+                            val = int(val)
+                    except (ValueError, OverflowError):
+                        val = val_str
+                cfg[section][key] = val
+    else:
+        logger.debug("No config file found at %s, using defaults", config_path)
+
+    return cfg
+
+# --- Stitcher config template ---
+# All {placeholders} are substituted at runtime by generate_config() using values from video2pano.conf
 VIDEO_CONFIG_TEMPLATE = """\
 CYLINDER {mode_cylinder}
 ESTIMATE_CAMERA {mode_estimate_camera}
 TRANS 0
 
 ORDERED_INPUT 1
-CROP 1
-MAX_OUTPUT_SIZE 8000
+CROP {crop}
+MAX_OUTPUT_SIZE {max_output_size}
 LAZY_READ 1
 
 FOCAL_LENGTH {focal_length}
 
 SIFT_WORKING_SIZE {sift_working_size}
 NUM_OCTAVE {num_octave}
-NUM_SCALE 7
-SCALE_FACTOR 1.4142135623
-GAUSS_SIGMA 1.4142135623
-GAUSS_WINDOW_FACTOR 4
+NUM_SCALE {num_scale}
+SCALE_FACTOR {scale_factor}
+GAUSS_SIGMA {gauss_sigma}
+GAUSS_WINDOW_FACTOR {gauss_window_factor}
 
 CONTRAST_THRES {contrast_thres}
-JUDGE_EXTREMA_DIFF_THRES 1e-3
-EDGE_RATIO 12
+JUDGE_EXTREMA_DIFF_THRES {judge_extrema_diff_thres}
+EDGE_RATIO {edge_ratio}
 
-PRE_COLOR_THRES 2e-2
-CALC_OFFSET_DEPTH 4
-OFFSET_THRES 0.5
+PRE_COLOR_THRES {pre_color_thres}
+CALC_OFFSET_DEPTH {calc_offset_depth}
+OFFSET_THRES {offset_thres}
 
-ORI_RADIUS 4.5
-ORI_HIST_SMOOTH_COUNT 2
-DESC_HIST_SCALE_FACTOR 3
-DESC_INT_FACTOR 512
+ORI_RADIUS {ori_radius}
+ORI_HIST_SMOOTH_COUNT {ori_hist_smooth_count}
+DESC_HIST_SCALE_FACTOR {desc_hist_scale_factor}
+DESC_INT_FACTOR {desc_int_factor}
 
-MATCH_REJECT_NEXT_RATIO 0.8
-RANSAC_ITERATIONS 2500
+MATCH_REJECT_NEXT_RATIO {match_reject_next_ratio}
+RANSAC_ITERATIONS {ransac_iterations}
 RANSAC_INLIER_THRES {ransac_inlier_thres}
 
-INLIER_IN_MATCH_RATIO 0.05
-INLIER_IN_POINTS_RATIO 0.02
+INLIER_IN_MATCH_RATIO {inlier_in_match_ratio}
+INLIER_IN_POINTS_RATIO {inlier_in_points_ratio}
 
-STRAIGHTEN 1
-SLOPE_PLAIN 8e-3
-LM_LAMBDA 5
-MULTIPASS_BA 1
+STRAIGHTEN {straighten}
+SLOPE_PLAIN {slope_plain}
+LM_LAMBDA {lm_lambda}
+MULTIPASS_BA {multipass_ba}
 
-MULTIBAND 0
+MULTIBAND {multiband}
 """
 
 
@@ -267,17 +367,17 @@ def _laplacian_variance(image_path):
         return None
 
 
-def score_frames(frame_paths, video_info):
+def score_frames(frame_paths, video_info, cfg):
     """Score all frames for sharpness.
 
     Uses file size (fast) and Laplacian variance (precise, if cv2 available).
     Returns list of dicts with: path, file_size, laplacian, is_sharp.
     """
+    qcfg = cfg["quality"]
     resolution = video_info["width"] * video_info["height"]
-    # Account for rotation: if rotated, effective resolution uses swapped dims
     if abs(video_info["rotation"]) in (90, 270):
-        resolution = video_info["height"] * video_info["width"]  # same, but explicit
-    filesize_threshold = int(BASE_FILESIZE_THRESHOLD * resolution / BASE_RESOLUTION)
+        resolution = video_info["height"] * video_info["width"]
+    filesize_threshold = int(qcfg["base_filesize_threshold"] * resolution / qcfg["base_resolution_pixels"])
 
     logger.info("Sharpness threshold: %d bytes (scaled for %dx%d)",
                 filesize_threshold, video_info["width"], video_info["height"])
@@ -311,7 +411,7 @@ def score_frames(frame_paths, video_info):
 
         # Adaptive threshold: fraction of median
         median_lap = sorted(laplacian_values)[len(laplacian_values) // 2]
-        lap_threshold = median_lap * LAPLACIAN_RATIO_THRESHOLD
+        lap_threshold = median_lap * qcfg["laplacian_ratio_threshold"]
         logger.info("Laplacian threshold: %.1f (median=%.1f)", lap_threshold, median_lap)
 
         for s in sharp_scores:
@@ -328,12 +428,13 @@ def score_frames(frame_paths, video_info):
 
 # --- Frame selection ---
 
-def select_frames(scored_frames, min_frames=8, max_frames=80):
+def select_frames(scored_frames, cfg, min_frames=8, max_frames=80):
     """Select best frames while maintaining sequential coverage.
 
     Divides sharp frames into temporal windows, picks the sharpest per window.
     Returns (selected_paths, selection_metadata).
     """
+    qcfg = cfg["quality"]
     sharp = [s for s in scored_frames if s["is_sharp"]]
 
     if len(sharp) < min_frames:
@@ -345,7 +446,7 @@ def select_frames(scored_frames, min_frames=8, max_frames=80):
         )
 
     pass_rate = len(sharp) / len(scored_frames) if scored_frames else 0
-    if pass_rate < MIN_SHARPNESS_PASS_RATE:
+    if pass_rate < qcfg["min_sharpness_pass_rate"]:
         raise QualityError(
             f"Extreme motion blur: only {pass_rate:.0%} of frames are sharp enough. "
             "Try recording with slower, steadier camera movement.",
@@ -367,26 +468,34 @@ def select_frames(scored_frames, min_frames=8, max_frames=80):
 
 # --- Config generation ---
 
-def generate_config(working_dir, focal_length_mm=DEFAULT_FOCAL_LENGTH_MM,
+def generate_config(working_dir, cfg, focal_length_mm=26,
                     use_cylinder=False, video_width=1920, video_height=1080):
     """Write config.cfg for the stitcher in working_dir.
 
-    Adapts SIFT and RANSAC parameters based on video resolution.
+    Adapts SIFT and RANSAC parameters based on video resolution,
+    using values from the loaded config.
     """
+    sift = cfg["sift"]
+    ransac = cfg["ransac"]
+    matching = cfg["matching"]
+    opt = cfg["optimization"]
+    out = cfg["output"]
+
     # SIFT_WORKING_SIZE must not exceed actual resolution (upscaling hurts feature detection)
     max_dim = max(video_width, video_height)
-    sift_working_size = min(1200, max_dim)
+    sift_working_size = min(sift["sift_working_size"], max_dim)
 
-    # Scale RANSAC inlier threshold relative to working size (base: 3.5 at 800px)
-    ransac_inlier_thres = round(3.5 * sift_working_size / 800, 1)
+    # Scale RANSAC inlier threshold relative to working size
+    ransac_inlier_thres = round(
+        ransac["base_inlier_thres"] * sift_working_size / ransac["base_inlier_resolution"], 1)
 
-    # For low-res video, relax contrast threshold further to get enough features
-    if max_dim < 1000:
-        contrast_thres = "1e-2"
-        num_octave = 4  # fewer octaves for small images
+    # Adapt for low-res video
+    if max_dim < sift["low_res_threshold"]:
+        contrast_thres = sift["contrast_thres_low_res"]
+        num_octave = sift["num_octave_low_res"]
     else:
-        contrast_thres = "1.5e-2"
-        num_octave = 5
+        contrast_thres = sift["contrast_thres_high_res"]
+        num_octave = sift["num_octave_high_res"]
 
     config_path = os.path.join(working_dir, "config.cfg")
     content = VIDEO_CONFIG_TEMPLATE.format(
@@ -395,8 +504,32 @@ def generate_config(working_dir, focal_length_mm=DEFAULT_FOCAL_LENGTH_MM,
         focal_length=focal_length_mm,
         sift_working_size=sift_working_size,
         num_octave=num_octave,
+        num_scale=sift["num_scale"],
+        scale_factor=sift["scale_factor"],
+        gauss_sigma=sift["gauss_sigma"],
+        gauss_window_factor=sift["gauss_window_factor"],
         contrast_thres=contrast_thres,
+        judge_extrema_diff_thres=sift["judge_extrema_diff_thres"],
+        edge_ratio=sift["edge_ratio"],
+        pre_color_thres=sift["pre_color_thres"],
+        calc_offset_depth=sift["calc_offset_depth"],
+        offset_thres=sift["offset_thres"],
+        ori_radius=matching["ori_radius"],
+        ori_hist_smooth_count=matching["ori_hist_smooth_count"],
+        desc_hist_scale_factor=matching["desc_hist_scale_factor"],
+        desc_int_factor=matching["desc_int_factor"],
+        match_reject_next_ratio=matching["match_reject_next_ratio"],
+        ransac_iterations=ransac["iterations"],
         ransac_inlier_thres=ransac_inlier_thres,
+        inlier_in_match_ratio=ransac["inlier_in_match_ratio"],
+        inlier_in_points_ratio=ransac["inlier_in_points_ratio"],
+        straighten=opt["straighten"],
+        slope_plain=opt["slope_plain"],
+        lm_lambda=opt["lm_lambda"],
+        multipass_ba=opt["multipass_ba"],
+        crop=out["crop"],
+        max_output_size=out["max_output_size"],
+        multiband=out["multiband"],
     )
     with open(config_path, "w") as f:
         f.write(content)
@@ -483,8 +616,8 @@ def run_stitcher(stitcher_binary, frame_paths, working_dir, min_connected=8):
 # --- Main pipeline ---
 
 def process_video(video_path, output_dir=None, project_root=None,
-                  min_frames=8, max_frames=80, keep_frames=False,
-                  focal_length=None):
+                  min_frames=None, max_frames=None, keep_frames=False,
+                  focal_length=None, config_path=None):
     """Main pipeline: video -> frames -> score -> select -> stitch -> panorama.
 
     Returns a complete result dict suitable for JSON serialization.
@@ -492,6 +625,12 @@ def process_video(video_path, output_dir=None, project_root=None,
     if project_root is None:
         project_root = str(Path(__file__).parent)
     stitcher_binary = os.path.join(project_root, "build", "src", "image-stitching")
+
+    cfg = load_config(config_path)
+    if min_frames is None:
+        min_frames = cfg["frames"]["min_frames"]
+    if max_frames is None:
+        max_frames = cfg["frames"]["max_frames"]
 
     # Setup working directory
     cleanup_dir = False
@@ -517,12 +656,12 @@ def process_video(video_path, output_dir=None, project_root=None,
 
         # 3. Score frames
         t0 = time.time()
-        scored, filesize_threshold = score_frames(frame_paths, video_info)
+        scored, filesize_threshold = score_frames(frame_paths, video_info, cfg)
         timings["score_seconds"] = round(time.time() - t0, 2)
 
         # 4. Select best frames
         t0 = time.time()
-        selected_paths, selected_meta = select_frames(scored, min_frames, max_frames)
+        selected_paths, selected_meta = select_frames(scored, cfg, min_frames, max_frames)
         timings["select_seconds"] = round(time.time() - t0, 2)
 
         # Build quality metrics
@@ -540,7 +679,8 @@ def process_video(video_path, output_dir=None, project_root=None,
             quality["min_laplacian_selected"] = round(min(laplacian_values), 1)
 
         # 5. Determine focal length (CLI override > metadata > default)
-        focal_mm = focal_length or video_info.get("focal_length_35mm") or DEFAULT_FOCAL_LENGTH_MM
+        default_focal = cfg["camera"]["default_focal_length_mm"]
+        focal_mm = focal_length or video_info.get("focal_length_35mm") or default_focal
         quality["focal_length_35mm"] = focal_mm
         quality["focal_source"] = ("metadata" if video_info.get("focal_length_35mm")
                                    else "default")
@@ -557,7 +697,7 @@ def process_video(video_path, output_dir=None, project_root=None,
         if abs(video_info["rotation"]) in (90, 270):
             vw, vh = vh, vw
 
-        config_kwargs = dict(focal_length_mm=focal_mm, video_width=vw, video_height=vh)
+        config_kwargs = dict(cfg=cfg, focal_length_mm=focal_mm, video_width=vw, video_height=vh)
 
         if focal_known:
             modes_to_try = [("cylinder", True), ("estimate_camera", False)]
@@ -643,6 +783,8 @@ def main():
     parser.add_argument("--max-frames", type=int, default=80, help="Maximum frames to stitch (default: 80)")
     parser.add_argument("--focal-length", type=float, default=None,
                         help="Override 35mm-equivalent focal length in mm (default: auto-detect or 26)")
+    parser.add_argument("--config", "-c", default=None,
+                        help="Path to video2pano.conf (default: video2pano.conf next to this script)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep extracted frames after stitching")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output on stderr")
     args = parser.parse_args()
@@ -667,6 +809,7 @@ def main():
             max_frames=args.max_frames,
             keep_frames=args.keep_frames,
             focal_length=args.focal_length,
+            config_path=args.config,
         )
         exit_code = EXIT_SUCCESS
 
