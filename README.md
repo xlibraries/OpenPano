@@ -20,13 +20,74 @@ We need the following dependencies:
 Eigen, CImg and FLANN are header-only, to simplify the compilation on different platforms.
 CImg and libjpeg are only used to read and write images, so you can easily get rid of them.
 
-On ArchLinux, install dependencies by: `sudo pacman -S gcc sed cmake make libjpeg eigen`
+### Linux
 
-On Ubuntu, install dependencies by: `sudo apt install build-essential sed cmake libjpeg-dev libeigen3-dev`
+On ArchLinux, install dependencies by:
+```
+sudo pacman -S gcc sed cmake make libjpeg eigen
+```
 
-### Compile:
-#### Linux / OSX / WSL (bash on windows)
-Use cmake (a good default to try):
+On Ubuntu, install dependencies by:
+```
+sudo apt install build-essential sed cmake libjpeg-dev libeigen3-dev
+```
+
+### macOS
+
+#### Prerequisites
+
+1. **Xcode Command Line Tools**: The C++ compiler and system headers are provided by Apple's developer tools. Install them and accept the license:
+```
+xcode-select --install
+sudo xcodebuild -license accept
+```
+
+2. **Homebrew dependencies**: Install the required libraries using [Homebrew](https://brew.sh/):
+```
+brew install cmake eigen libjpeg
+```
+
+#### OpenMP (optional, for multi-threaded performance)
+
+The default Apple Clang shipped with Xcode does **not** include OpenMP support. Without it, the program will compile and run correctly, but will use only a single thread (slower for large image sets).
+
+To enable OpenMP, you have two options:
+
+* **Option A** — Install `libomp` for use with Apple Clang:
+  ```
+  brew install libomp
+  ```
+  Then configure cmake with:
+  ```
+  cmake -B build \
+    -DOpenMP_CXX_FLAGS="-Xclang -fopenmp" \
+    -DOpenMP_CXX_LIB_NAMES="omp" \
+    -DOpenMP_omp_LIBRARY=$(brew --prefix libomp)/lib/libomp.dylib \
+    -DCMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include"
+  make -C build
+  ```
+
+* **Option B** — Use GCC instead of Apple Clang:
+  ```
+  brew install gcc
+  cmake -B build -DCMAKE_CXX_COMPILER=g++-14
+  make -C build
+  ```
+
+See [#16](https://github.com/ppwwyyxx/OpenPano/issues/16) for more details.
+
+#### Eigen path note (Makefile only)
+
+If you use the Makefile build (`make -C src`) instead of cmake, note that the default Eigen include path for macOS is `/usr/local/include/eigen3`. On Apple Silicon Macs, Homebrew installs to `/opt/homebrew`, so you will need to override it:
+```
+make -C src EIGEN3_INCLUDE_DIR=/opt/homebrew/include/eigen3
+```
+The cmake build handles this automatically via `find_package(Eigen3)` and is the recommended approach on macOS.
+
+### Compile
+
+#### Linux / macOS / WSL (bash on windows)
+Use cmake (recommended):
 ```
 $ cmake -B build && make -C build
 # Binary will be found at ./build/src/image-stitching
@@ -36,9 +97,6 @@ or, use make (more customizable. You can modify Makefile when you run into probl
 $ make -C src
 # Binary will be found at ./src/image-stitching
 ```
-The default clang on OSX doesn't contain openmp support.
-You may need gcc or different clang. See [#16](https://github.com/ppwwyyxx/OpenPano/issues/16).
-
 
 #### Windows (for VS2015)
 * Install cmake, VS2015
