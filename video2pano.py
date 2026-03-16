@@ -15,6 +15,7 @@ Progress/debug info goes to stderr.
 
 import argparse
 import configparser
+import gc
 import json
 import logging
 import math
@@ -325,8 +326,12 @@ def _extract_focal_length(video_path):
 
 # --- Frame extraction ---
 
-def extract_frames(video_path, output_dir, jpeg_quality=2):
-    """Extract all frames from video at native fps using ffmpeg.
+def extract_frames(video_path, output_dir, video_fps=30.0, jpeg_quality=2):
+    """Extract frames from video at an appropriate rate using ffmpeg.
+
+    For panorama stitching, consecutive frames need meaningful displacement (~70% overlap).
+    High-fps videos (60/120/240fps) are decimated to ~5fps to avoid near-identical frames
+    that cause degenerate homography estimation.
 
     Returns sorted list of paths to extracted JPEG files.
     """
@@ -337,12 +342,19 @@ def extract_frames(video_path, output_dir, jpeg_quality=2):
     os.makedirs(output_dir, exist_ok=True)
     pattern = os.path.join(output_dir, "frame_%05d.jpg")
 
-    cmd = [
-        ffmpeg, "-i", video_path,
-        "-qscale:v", str(jpeg_quality),
-        pattern, "-y"
-    ]
-    logger.info("Extracting frames...")
+    # Cap extraction rate: at >10fps, consecutive panorama frames are too similar.
+    # 5fps is a good target for handheld panning videos (~70% overlap between frames).
+    max_extraction_fps = 5.0
+    extraction_fps = min(video_fps, max_extraction_fps)
+
+    cmd = [ffmpeg, "-i", video_path]
+    if extraction_fps < video_fps:
+        cmd += ["-vf", f"fps={extraction_fps}"]
+        logger.info("Extracting frames at %.1ffps (decimated from %.1ffps)...",
+                    extraction_fps, video_fps)
+    else:
+        logger.info("Extracting frames at native %.1ffps...", video_fps)
+    cmd += ["-qscale:v", str(jpeg_quality), pattern, "-y"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise InputError(f"ffmpeg extraction failed: {result.stderr[-500:]}", "EXTRACTION_FAILED")
@@ -364,7 +376,10 @@ def _laplacian_variance(image_path):
         img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             return 0.0
-        return cv2.Laplacian(img, cv2.CV_64F).var()
+        lap = cv2.Laplacian(img, cv2.CV_64F)
+        val = float(lap.var())
+        del img, lap
+        return val
     except ImportError:
         return None
 
@@ -372,28 +387,41 @@ def _laplacian_variance(image_path):
 def score_frames(frame_paths, video_info, cfg):
     """Score all frames for sharpness.
 
-    Uses file size (fast) and Laplacian variance (precise, if cv2 available).
+    Uses file size (fast, adaptive) and Laplacian variance (precise, if cv2 available).
+    The file size threshold adapts to scene brightness by using both a resolution-scaled
+    minimum and a fraction of the median file size — whichever is lower.
     Returns list of dicts with: path, file_size, laplacian, is_sharp.
     """
     qcfg = cfg["quality"]
     resolution = video_info["width"] * video_info["height"]
     if abs(video_info["rotation"]) in (90, 270):
         resolution = video_info["height"] * video_info["width"]
-    filesize_threshold = int(qcfg["base_filesize_threshold"] * resolution / qcfg["base_resolution_pixels"])
+    fixed_threshold = int(qcfg["base_filesize_threshold"] * resolution / qcfg["base_resolution_pixels"])
 
-    logger.info("Sharpness threshold: %d bytes (scaled for %dx%d)",
-                filesize_threshold, video_info["width"], video_info["height"])
-
-    # First pass: file sizes (fast)
+    # First pass: collect file sizes
     scores = []
+    all_sizes = []
     for path in frame_paths:
         sz = os.path.getsize(path)
         scores.append({
             "path": path,
             "file_size": sz,
             "laplacian": None,
-            "is_sharp": sz >= filesize_threshold,
+            "is_sharp": False,
         })
+        all_sizes.append(sz)
+
+    # Adaptive threshold: use min(fixed_threshold, 50% of median file size).
+    # This handles dark/low-contrast scenes where all frames compress small.
+    median_size = sorted(all_sizes)[len(all_sizes) // 2] if all_sizes else 0
+    adaptive_threshold = int(median_size * 0.5)
+    filesize_threshold = min(fixed_threshold, max(adaptive_threshold, 1024))
+
+    logger.info("Sharpness threshold: %d bytes (fixed=%d, adaptive=%d, median=%d)",
+                filesize_threshold, fixed_threshold, adaptive_threshold, median_size)
+
+    for s in scores:
+        s["is_sharp"] = s["file_size"] >= filesize_threshold
 
     # Second pass: Laplacian variance on frames that passed file size check
     has_cv2 = True
@@ -424,6 +452,9 @@ def score_frames(frame_paths, video_info, cfg):
     pass_rate = total_sharp / len(scores) if scores else 0
     logger.info("Sharpness: %d/%d frames pass (%.0f%%)",
                 total_sharp, len(scores), pass_rate * 100)
+
+    # Release OpenCV memory before stitcher runs (Python allocator holds freed blocks)
+    gc.collect()
 
     return scores, filesize_threshold
 
@@ -471,7 +502,8 @@ def select_frames(scored_frames, cfg, min_frames=8, max_frames=80):
 # --- Config generation ---
 
 def generate_config(working_dir, cfg, focal_length_mm=26,
-                    use_cylinder=False, video_width=1920, video_height=1080):
+                    use_cylinder=False, video_width=1920, video_height=1080,
+                    num_frames=None):
     """Write config.cfg for the stitcher in working_dir.
 
     Adapts SIFT and RANSAC parameters based on video resolution,
@@ -498,6 +530,16 @@ def generate_config(working_dir, cfg, focal_length_mm=26,
     else:
         contrast_thres = sift["contrast_thres_high_res"]
         num_octave = sift["num_octave_high_res"]
+
+    # Adaptive multiband: disable for large stitching jobs to prevent OOM.
+    # Multiband blending builds Laplacian pyramids for all images simultaneously,
+    # which can consume several GB for many large frames.
+    multiband = out["multiband"]
+    if multiband > 0 and num_frames and num_frames > 0:
+        total_mpx = num_frames * video_width * video_height / 1e6
+        if total_mpx > 150:  # >150 megapixels total input
+            logger.warning("Disabling multiband blending (%.0f MP total, OOM risk)", total_mpx)
+            multiband = 0
 
     config_path = os.path.join(working_dir, "config.cfg")
     content = VIDEO_CONFIG_TEMPLATE.format(
@@ -531,7 +573,7 @@ def generate_config(working_dir, cfg, focal_length_mm=26,
         multipass_ba=opt["multipass_ba"],
         crop=out["crop"],
         max_output_size=out["max_output_size"],
-        multiband=out["multiband"],
+        multiband=multiband,
     )
     with open(config_path, "w") as f:
         f.write(content)
@@ -643,6 +685,31 @@ def compute_fov(proj_range):
         "vaov": round(vaov, 1),
         "center_yaw": round(center_yaw, 1),
         "center_pitch": round(center_pitch, 1),
+    }
+
+
+def compute_cylinder_proj_range(pano_size, frame_w, frame_h, focal_mm):
+    """Compute projection range (in radians) from cylinder mode output.
+
+    In CylinderWarper: r = hypot(w,h) * (focal/43.266), and x_out = r * atan(X/r).
+    So 1 output pixel = 1/r radians horizontally.
+    Vertically: y_out = r * Y/hypot(X, r), so vaov ≈ 2*atan(h/(2r)).
+    """
+    if not pano_size or not focal_mm or focal_mm <= 0:
+        return None
+    pano_w, pano_h = pano_size
+    f_px = math.hypot(frame_w, frame_h) * (focal_mm / 43.266)
+    if f_px <= 0:
+        return None
+
+    haov_rad = pano_w / f_px
+    vaov_rad = 2 * math.atan(pano_h / (2 * f_px))
+
+    return {
+        "min_lon": -haov_rad / 2,
+        "max_lon": haov_rad / 2,
+        "min_lat": -vaov_rad / 2,
+        "max_lat": vaov_rad / 2,
     }
 
 
@@ -761,7 +828,7 @@ def process_video(video_path, output_dir=None, project_root=None,
 
         # 2. Extract frames
         t0 = time.time()
-        frame_paths = extract_frames(video_path, frames_dir)
+        frame_paths = extract_frames(video_path, frames_dir, video_fps=video_info["fps"])
         timings["extract_seconds"] = round(time.time() - t0, 2)
 
         # 3. Score frames
@@ -807,7 +874,8 @@ def process_video(video_path, output_dir=None, project_root=None,
         if abs(video_info["rotation"]) in (90, 270):
             vw, vh = vh, vw
 
-        config_kwargs = dict(cfg=cfg, focal_length_mm=focal_mm, video_width=vw, video_height=vh)
+        config_kwargs = dict(cfg=cfg, focal_length_mm=focal_mm, video_width=vw, video_height=vh,
+                             num_frames=len(selected_paths))
 
         if focal_known:
             modes_to_try = [("cylinder", True), ("estimate_camera", False)]
@@ -835,13 +903,27 @@ def process_video(video_path, output_dir=None, project_root=None,
 
         # 7. Compute FOV from projection range
         proj_range = stitch_result.get("proj_range")
+        # For CYLINDER mode, compute proj_range from focal length and output dimensions
+        if not proj_range and stitch_mode == "cylinder" and stitch_result["final_size"]:
+            proj_range = compute_cylinder_proj_range(
+                stitch_result["final_size"], vw, vh, focal_mm)
+            if proj_range:
+                logger.info("Cylinder FOV: haov=%.1f°, vaov=%.1f°",
+                    (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi,
+                    (proj_range["max_lat"] - proj_range["min_lat"]) * 180 / math.pi)
         fov = compute_fov(proj_range)
 
         # 8. Format output
         final_path = os.path.join(output_dir, "panorama.jpg")
         equirect_size = None
 
-        if equirectangular and proj_range and stitch_mode == "estimate_camera":
+        # Only embed in full 2:1 canvas if panorama covers >270° horizontally.
+        # For partial panoramas, the output is already equirectangular projection —
+        # just provide FOV metadata and let Pannellum handle partial view.
+        haov_deg = (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi if proj_range else 0
+        do_full_equirect = equirectangular and proj_range and haov_deg > 270
+
+        if do_full_equirect:
             # Embed partial panorama in full 2:1 equirectangular canvas
             equirect_path = os.path.join(output_dir, "panorama_equirect.jpg")
             equirect_size = format_equirectangular(
@@ -885,17 +967,19 @@ def process_video(video_path, output_dir=None, project_root=None,
         if fov:
             stitch_info["fov"] = fov
 
-        # Pannellum viewer config (partial or full equirectangular)
-        pannellum = {"type": "equirectangular", "panorama": "panorama.jpg"}
+        # Pannellum viewer config
+        pannellum = {"type": "equirectangular", "panorama": "panorama.jpg", "autoLoad": True}
         if fov:
             if equirect_size:
-                # Full canvas — Pannellum defaults work (haov=360, vaov=180)
-                pannellum["autoLoad"] = True
+                # Full 2:1 canvas — Pannellum defaults work (haov=360, vaov=180)
+                pass
             else:
                 # Partial panorama — tell Pannellum the actual FOV
                 pannellum["haov"] = fov["haov"]
                 pannellum["vaov"] = fov["vaov"]
-                pannellum["autoLoad"] = True
+                if fov["haov"] < 360:
+                    pannellum["minHfov"] = min(50, fov["haov"])
+                    pannellum["maxHfov"] = fov["haov"]
         stitch_info["pannellum"] = pannellum
 
         result = {
@@ -929,8 +1013,10 @@ def main():
     parser.add_argument("video_path", help="Path to input video file")
     parser.add_argument("--output-dir", "-o", help="Output directory (default: auto temp dir)")
     parser.add_argument("--project-root", help="OpenPano project root (default: script directory)")
-    parser.add_argument("--min-frames", type=int, default=8, help="Minimum sharp frames required (default: 8)")
-    parser.add_argument("--max-frames", type=int, default=80, help="Maximum frames to stitch (default: 80)")
+    parser.add_argument("--min-frames", type=int, default=None,
+                        help="Minimum sharp frames required (default: from config, usually 8)")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Maximum frames to stitch (default: from config, usually 80)")
     parser.add_argument("--focal-length", type=float, default=None,
                         help="Override 35mm-equivalent focal length in mm (default: auto-detect or 26)")
     parser.add_argument("--config", "-c", default=None,
