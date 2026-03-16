@@ -17,7 +17,9 @@ import argparse
 import configparser
 import json
 import logging
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -566,26 +568,34 @@ def run_stitcher(stitcher_binary, frame_paths, working_dir, min_connected=8):
     combined_output = result.stdout + result.stderr
     logger.debug("Stitcher output:\n%s", combined_output[-2000:])
 
-    # Parse final image size from output
+    # Strip ANSI escape codes for parsing
+    clean_output = re.sub(r'\x1b\[[0-9;]*m', '', combined_output)
+
+    # Parse final image size and projection range from output
     final_size = None
-    for line in combined_output.split("\n"):
+    proj_range = None
+    for line in clean_output.split("\n"):
         if "Final Image Size:" in line:
-            import re
             m = re.search(r"Final Image Size:\s*\((\d+),\s*(\d+)\)", line)
             if m:
                 final_size = [int(m.group(1)), int(m.group(2))]
         if "Crop from" in line:
-            import re
             m = re.search(r"Crop from \d+x\d+ to (\d+)x(\d+)", line)
             if m:
                 final_size = [int(m.group(1)), int(m.group(2))]
+        # Parse "projmin: -3.1 -0.8, projmax: 3.1 0.8"
+        if "projmin:" in line:
+            m = re.search(r"projmin:\s*([-\d.]+)\s+([-\d.]+),\s*projmax:\s*([-\d.]+)\s+([-\d.]+)", line)
+            if m:
+                proj_range = {
+                    "min_lon": float(m.group(1)), "min_lat": float(m.group(2)),
+                    "max_lon": float(m.group(3)), "max_lat": float(m.group(4)),
+                }
 
     if result.returncode != 0 or not os.path.isfile(output_file):
         # Extract error message from stitcher output
-        error_lines = [l for l in combined_output.split("\n") if "error" in l.lower()]
+        error_lines = [l for l in clean_output.split("\n") if "error" in l.lower()]
         error_msg = error_lines[-1].strip() if error_lines else "Unknown stitcher error"
-        import re
-        error_msg = re.sub(r'\x1b\[[0-9;]*m', '', error_msg)
 
         # Check if chain broke at a specific image — we can retry with the connected subset
         m = re.search(r"Image (\d+) and (\d+) don't match", error_msg)
@@ -608,16 +618,116 @@ def run_stitcher(stitcher_binary, frame_paths, working_dir, min_connected=8):
         "success": True,
         "output_path": output_file,
         "final_size": final_size,
+        "proj_range": proj_range,
         "duration_seconds": round(duration, 2),
         "frames_used": len(frame_paths),
     }
+
+
+# --- Equirectangular formatting ---
+
+def compute_fov(proj_range):
+    """Compute horizontal/vertical angle of view from projection range (radians).
+
+    Returns dict with haov, vaov (degrees), and center yaw/pitch.
+    """
+    if not proj_range:
+        return None
+    haov = (proj_range["max_lon"] - proj_range["min_lon"]) * 180.0 / math.pi
+    vaov = (proj_range["max_lat"] - proj_range["min_lat"]) * 180.0 / math.pi
+    # Center of the panorama in degrees (yaw=0 is forward, pitch=0 is horizon)
+    center_yaw = (proj_range["min_lon"] + proj_range["max_lon"]) / 2 * 180.0 / math.pi
+    center_pitch = (proj_range["min_lat"] + proj_range["max_lat"]) / 2 * 180.0 / math.pi
+    return {
+        "haov": round(haov, 1),
+        "vaov": round(vaov, 1),
+        "center_yaw": round(center_yaw, 1),
+        "center_pitch": round(center_pitch, 1),
+    }
+
+
+def format_equirectangular(input_path, output_path, proj_range, equirect_width=4096):
+    """Embed a partial panorama into a full 2:1 equirectangular canvas.
+
+    The input image is placed at its correct angular position in a full
+    360x180 degree equirectangular image. Uncovered areas are black.
+
+    Args:
+        input_path: path to the partial panorama (already equirectangular projection)
+        output_path: path for the full equirectangular output
+        proj_range: dict with min_lon, max_lon, min_lat, max_lat (radians)
+        equirect_width: width of the full equirectangular output (height = width/2)
+
+    Returns:
+        (output_width, output_height) of the full equirectangular image.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        logger.warning("OpenCV required for equirectangular formatting. Skipping.")
+        shutil.copy2(input_path, output_path)
+        return None
+
+    pano = cv2.imread(input_path)
+    if pano is None:
+        logger.error("Failed to read panorama: %s", input_path)
+        return None
+
+    pano_h, pano_w = pano.shape[:2]
+    equirect_h = equirect_width // 2  # 2:1 aspect
+
+    # Full equirectangular: longitude [-pi, pi] → x [0, equirect_width]
+    #                       latitude  [pi/2, -pi/2] → y [0, equirect_h]  (top=north)
+    # Map projection range to pixel coordinates in the full canvas
+    min_lon, max_lon = proj_range["min_lon"], proj_range["max_lon"]
+    min_lat, max_lat = proj_range["min_lat"], proj_range["max_lat"]
+
+    # Longitude to x: x = (lon + pi) / (2*pi) * width
+    x_start = int((min_lon + math.pi) / (2 * math.pi) * equirect_width)
+    x_end = int((max_lon + math.pi) / (2 * math.pi) * equirect_width)
+
+    # Latitude to y: y = (pi/2 - lat) / pi * height  (north up)
+    y_start = int((math.pi / 2 - max_lat) / math.pi * equirect_h)
+    y_end = int((math.pi / 2 - min_lat) / math.pi * equirect_h)
+
+    # Ensure valid bounds
+    place_w = max(1, x_end - x_start)
+    place_h = max(1, y_end - y_start)
+
+    # Create full black canvas
+    canvas = np.zeros((equirect_h, equirect_width, 3), dtype=np.uint8)
+
+    # Resize partial pano to fit its angular slot in the full canvas
+    resized = cv2.resize(pano, (place_w, place_h), interpolation=cv2.INTER_LANCZOS4)
+
+    # Handle wrapping (panorama crossing the -pi/+pi boundary)
+    if x_start >= 0 and x_end <= equirect_width:
+        # No wrapping
+        canvas[y_start:y_start + place_h, x_start:x_start + place_w] = resized
+    else:
+        # Wrapping around the seam
+        if x_start < 0:
+            left_part = -x_start
+            canvas[y_start:y_start + place_h, 0:place_w - left_part] = resized[:, left_part:]
+            canvas[y_start:y_start + place_h, equirect_width - left_part:] = resized[:, :left_part]
+        elif x_end > equirect_width:
+            right_overflow = x_end - equirect_width
+            canvas[y_start:y_start + place_h, x_start:equirect_width] = resized[:, :place_w - right_overflow]
+            canvas[y_start:y_start + place_h, 0:right_overflow] = resized[:, place_w - right_overflow:]
+
+    cv2.imwrite(output_path, canvas, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    logger.info("Equirectangular output: %dx%d, placed at (%d,%d)-(%d,%d)",
+                equirect_width, equirect_h, x_start, y_start, x_end, y_end)
+    return [equirect_width, equirect_h]
 
 
 # --- Main pipeline ---
 
 def process_video(video_path, output_dir=None, project_root=None,
                   min_frames=None, max_frames=None, keep_frames=False,
-                  focal_length=None, config_path=None):
+                  focal_length=None, config_path=None,
+                  equirectangular=False, equirect_width=4096):
     """Main pipeline: video -> frames -> score -> select -> stitch -> panorama.
 
     Returns a complete result dict suitable for JSON serialization.
@@ -723,9 +833,28 @@ def process_video(video_path, output_dir=None, project_root=None,
 
         timings["stitch_seconds"] = round(time.time() - t0, 2)
 
-        # 7. Move output to final location
+        # 7. Compute FOV from projection range
+        proj_range = stitch_result.get("proj_range")
+        fov = compute_fov(proj_range)
+
+        # 8. Format output
         final_path = os.path.join(output_dir, "panorama.jpg")
-        shutil.move(stitch_result["output_path"], final_path)
+        equirect_size = None
+
+        if equirectangular and proj_range and stitch_mode == "estimate_camera":
+            # Embed partial panorama in full 2:1 equirectangular canvas
+            equirect_path = os.path.join(output_dir, "panorama_equirect.jpg")
+            equirect_size = format_equirectangular(
+                stitch_result["output_path"], equirect_path, proj_range, equirect_width)
+            if equirect_size:
+                shutil.move(equirect_path, final_path)
+                # Also keep the cropped version
+                shutil.move(stitch_result["output_path"],
+                            os.path.join(output_dir, "panorama_cropped.jpg"))
+            else:
+                shutil.move(stitch_result["output_path"], final_path)
+        else:
+            shutil.move(stitch_result["output_path"], final_path)
 
         # Collect warnings
         warnings = []
@@ -745,19 +874,40 @@ def process_video(video_path, output_dir=None, project_root=None,
 
         timings["total_seconds"] = round(sum(timings.values()), 2)
 
-        return {
+        # Build stitch result
+        stitch_info = {
+            "final_size": equirect_size or stitch_result["final_size"],
+            "stitched_size": stitch_result["final_size"],
+            "duration_seconds": stitch_result["duration_seconds"],
+            "mode": stitch_mode,
+            "projection": "equirectangular",
+        }
+        if fov:
+            stitch_info["fov"] = fov
+
+        # Pannellum viewer config (partial or full equirectangular)
+        pannellum = {"type": "equirectangular", "panorama": "panorama.jpg"}
+        if fov:
+            if equirect_size:
+                # Full canvas — Pannellum defaults work (haov=360, vaov=180)
+                pannellum["autoLoad"] = True
+            else:
+                # Partial panorama — tell Pannellum the actual FOV
+                pannellum["haov"] = fov["haov"]
+                pannellum["vaov"] = fov["vaov"]
+                pannellum["autoLoad"] = True
+        stitch_info["pannellum"] = pannellum
+
+        result = {
             "status": "success",
             "output_path": os.path.abspath(final_path),
             "video": video_info,
             "quality": quality,
-            "stitch": {
-                "final_size": stitch_result["final_size"],
-                "duration_seconds": stitch_result["duration_seconds"],
-                "mode": stitch_mode,
-            },
+            "stitch": stitch_info,
             "warnings": warnings,
             "timing": timings,
         }
+        return result
 
     finally:
         # Cleanup extracted frames unless asked to keep them
@@ -785,6 +935,10 @@ def main():
                         help="Override 35mm-equivalent focal length in mm (default: auto-detect or 26)")
     parser.add_argument("--config", "-c", default=None,
                         help="Path to video2pano.conf (default: video2pano.conf next to this script)")
+    parser.add_argument("--equirectangular", "-e", action="store_true",
+                        help="Output as full 2:1 equirectangular image (for 360 viewers like Pannellum)")
+    parser.add_argument("--equirect-width", type=int, default=4096,
+                        help="Width of full equirectangular output (default: 4096, height=width/2)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep extracted frames after stitching")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output on stderr")
     args = parser.parse_args()
@@ -810,6 +964,8 @@ def main():
             keep_frames=args.keep_frames,
             focal_length=args.focal_length,
             config_path=args.config,
+            equirectangular=args.equirectangular,
+            equirect_width=args.equirect_width,
         )
         exit_code = EXIT_SUCCESS
 
