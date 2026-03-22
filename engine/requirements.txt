@@ -1,0 +1,7 @@
+# OpenPano Engine - Python dependencies
+#
+# Core: only Python 3.7+ stdlib (subprocess, configparser, json, etc.)
+# External tools: ffmpeg and ffprobe must be on PATH
+#
+# Optional - enables Laplacian-based sharpness scoring (recommended):
+# opencv-python-headless

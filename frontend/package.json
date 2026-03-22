@@ -1,17 +1,14 @@
 {
-  "name": "openpano-web",
+  "name": "openpano-frontend",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"npm run dev:api\" \"npm run dev:next\"",
-    "dev:next": "next dev --port 3000",
-    "dev:api": "PYTHON=${PYTHON:-python3} && $PYTHON server.py",
+    "dev": "next dev --port 3000",
     "build": "next build",
-    "start": "concurrently \"npm run dev:api\" \"next start\"",
+    "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
-    "concurrently": "^9.2.1",
     "next": "16.2.1",
     "react": "19.2.4",
     "react-dom": "19.2.4"

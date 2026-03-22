@@ -1,40 +1,24 @@
-Eigen/
-obj
-main
-data/
-*.png
-*.zip
-*.jpg
-.tags
-output
-*.pyc
-build/
-CMakeCache.txt
-CMakeFiles/
-src/CMakeFiles/
-src/*.jpg
-src/image_stitching
-MakeFile
-src/MakeFile
-log
-*~
-*.o
-*-report
-*.so
-*.vcxproj
-*.vcxproj.*
-*.VC
-*.VC.*
-*.sln
-Win32/
-ipch/
-Debug
-cmake_install.cmake
-src/cmake_install.cmake
-.vs/
+# Engine
+engine/build/
+engine/*.o
+engine/*.so
+engine/output/
+engine/__pycache__/
 
-example-data
+# Backend
+backend/jobs/
+backend/__pycache__/
+backend/.env
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# General
+*.pyc
+.DS_Store
+
+# Legacy
+example-data/
 example-data.tgz
-web/jobs/
-web/node_modules/
-web/.next/

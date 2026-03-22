@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""OpenPano Web — Upload video, get interactive panorama viewer."""
+"""OpenPano Backend — REST API for panorama pipeline."""
 
 import json
 import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -14,19 +15,19 @@ from flask import Flask, Response, jsonify, request, send_file
 
 app = Flask(__name__)
 
-# --- Configuration ---
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PYTHON_BIN = os.environ.get(
-    "PYTHON", "/Users/xlib/micromamba/envs/pano/bin/python"
+# --- Configuration via environment variables ---
+ENGINE_PYTHON = os.environ.get("ENGINE_PYTHON", "python3")
+ENGINE_SCRIPT = os.environ.get("ENGINE_SCRIPT")  # Required: path to video2pano.py
+ENGINE_ROOT = os.environ.get("ENGINE_ROOT")  # Optional: --project-root for engine
+JOBS_DIR = os.environ.get(
+    "JOBS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
 )
-VIDEO2PANO = os.path.join(PROJECT_ROOT, "video2pano.py")
-JOBS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
 # --- Job registry ---
-jobs = {}  # job_id -> {status, progress_queue, result, output_dir, video_path}
+jobs = {}  # job_id -> {status, progress_queue, progress, result, output_dir, video_path}
 
 # Stage mapping: (stderr keyword, UI label, percent)
 STAGE_MAP = [
@@ -69,13 +70,13 @@ def run_pipeline(job_id):
     video_path = job["video_path"]
 
     cmd = [
-        PYTHON_BIN, VIDEO2PANO,
+        ENGINE_PYTHON, ENGINE_SCRIPT,
         video_path,
         "-o", output_dir,
-        "-e",
         "-v",
-        "--project-root", PROJECT_ROOT,
     ]
+    if ENGINE_ROOT:
+        cmd.extend(["--project-root", ENGINE_ROOT])
 
     try:
         proc = subprocess.Popen(
@@ -181,7 +182,6 @@ def job_events(job_id):
             try:
                 msg = q.get(timeout=60)
             except queue.Empty:
-                # Send keepalive comment to prevent timeout
                 yield ": keepalive\n\n"
                 continue
             if msg is None:
@@ -216,9 +216,16 @@ def serve_panorama(job_id):
 
 
 if __name__ == "__main__":
+    if not ENGINE_SCRIPT:
+        print("ERROR: ENGINE_SCRIPT env var must be set (path to video2pano.py)")
+        sys.exit(1)
+    if not os.path.isfile(ENGINE_SCRIPT):
+        print(f"ERROR: ENGINE_SCRIPT not found: {ENGINE_SCRIPT}")
+        sys.exit(1)
     os.makedirs(JOBS_DIR, exist_ok=True)
     port = int(os.environ.get("PORT", 8080))
-    print(f"OpenPano Web starting on http://localhost:{port}")
-    print(f"Project root: {PROJECT_ROOT}")
-    print(f"Python: {PYTHON_BIN}")
+    print(f"OpenPano Backend starting on http://localhost:{port}")
+    print(f"Engine: {ENGINE_PYTHON} {ENGINE_SCRIPT}")
+    if ENGINE_ROOT:
+        print(f"Engine root: {ENGINE_ROOT}")
     app.run(host="0.0.0.0", port=port, debug=True, threaded=True)
