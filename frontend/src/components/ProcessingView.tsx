@@ -67,19 +67,52 @@ export default function ProcessingView({
     };
   }, [jobId, onComplete, onError]);
 
+  const formatTime = (s: number) => {
+    const min = Math.floor(s / 60);
+    const sec = s % 60;
+    return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+  };
+
   return (
-    <div className="max-w-lg mx-auto text-center">
-      <h2 className="text-2xl text-primary mb-6">Processing Video</h2>
-      <div className="bg-surface rounded-xl p-8">
-        <p className="text-lg mb-4">{stage}</p>
-        <div className="w-full h-2 bg-border rounded-full overflow-hidden">
+    <div className="flex items-center justify-center min-h-[70vh] px-4">
+      <div
+        className="max-w-md w-full text-center"
+        style={{ animation: "fade-in 0.3s ease" }}
+      >
+        {/* Spinning indicator */}
+        <div className="relative w-16 h-16 mx-auto mb-8">
+          <div className="absolute inset-0 rounded-full border-2 border-border" />
           <div
-            className="h-full bg-gradient-to-r from-primary to-pink-400 rounded-full transition-all duration-400"
-            style={{ width: `${percent}%` }}
+            className="absolute inset-0 rounded-full border-2 border-transparent border-t-primary animate-spin"
+            style={{ animationDuration: "1.2s" }}
           />
+          <div className="absolute inset-0 flex items-center justify-center text-lg">
+            &#10024;
+          </div>
         </div>
-        <p className="text-detail text-xs mt-3 break-all">{detail}</p>
-        <p className="text-muted mt-3">Elapsed: {elapsed}s</p>
+
+        <h2 className="text-xl font-semibold mb-1">Processing Video</h2>
+        <p className="text-muted mb-8 text-sm">{stage}</p>
+
+        {/* Progress bar */}
+        <div className="bg-surface rounded-xl p-5">
+          <div className="w-full h-2 bg-border rounded-full overflow-hidden mb-3">
+            <div
+              className="h-full bg-gradient-to-r from-primary to-pink-400 rounded-full transition-all duration-500"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+          <div className="flex justify-between text-xs text-detail">
+            <span>{percent}%</span>
+            <span>{formatTime(elapsed)}</span>
+          </div>
+        </div>
+
+        {detail && (
+          <p className="text-detail text-xs mt-4 break-all leading-relaxed">
+            {detail}
+          </p>
+        )}
       </div>
     </div>
   );

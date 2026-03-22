@@ -35,8 +35,8 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   const viewerRef = useRef<PannellumViewer | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [autoRotate, setAutoRotate] = useState(false);
-  const [rotateSpeed, setRotateSpeed] = useState(2);
   const [hfov, setHfov] = useState(100);
+  const [showInfo, setShowInfo] = useState(false);
 
   const fov = result.stitch?.fov;
   const quality = result.quality;
@@ -56,7 +56,7 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
     const config: Record<string, unknown> = {
       ...panoConfig,
       autoLoad: true,
-      showControls: true,
+      showControls: false,
       mouseZoom: true,
       keyboardZoom: true,
       draggable: true,
@@ -82,34 +82,21 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
     };
   }, [stitch, fov, initialHfov]);
 
-  const handleAutoRotate = useCallback(
-    (checked: boolean) => {
-      setAutoRotate(checked);
-      if (checked) {
-        viewerRef.current?.startAutoRotate(rotateSpeed);
-      } else {
-        viewerRef.current?.stopAutoRotate();
-      }
-    },
-    [rotateSpeed]
-  );
-
-  const handleSpeedChange = useCallback(
-    (speed: number) => {
-      setRotateSpeed(speed);
-      if (autoRotate) {
-        viewerRef.current?.startAutoRotate(speed);
-      }
-    },
-    [autoRotate]
-  );
+  const handleAutoRotate = useCallback((checked: boolean) => {
+    setAutoRotate(checked);
+    if (checked) {
+      viewerRef.current?.startAutoRotate(2);
+    } else {
+      viewerRef.current?.stopAutoRotate();
+    }
+  }, []);
 
   const handleHfovChange = useCallback((val: number) => {
     setHfov(val);
     viewerRef.current?.setHfov(val);
   }, []);
 
-  const handleReset = useCallback(() => {
+  const handleResetView = useCallback(() => {
     const v = viewerRef.current;
     if (!v) return;
     v.setHfov(initialHfov);
@@ -118,147 +105,268 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
     setHfov(initialHfov);
   }, [initialHfov, fov]);
 
+  const handleDownload = useCallback(() => {
+    const panoUrl = result.stitch?.pannellum?.panorama;
+    if (!panoUrl) return;
+    const a = document.createElement("a");
+    a.href = panoUrl as string;
+    a.download = "panorama.jpg";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, [result]);
+
+  const ToolbarButton = ({
+    onClick,
+    title,
+    active,
+    children,
+  }: {
+    onClick: () => void;
+    title: string;
+    active?: boolean;
+    children: React.ReactNode;
+  }) => (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors ${
+        active
+          ? "bg-primary text-white"
+          : "bg-white/10 hover:bg-white/20 text-white/80 hover:text-white"
+      }`}
+    >
+      {children}
+    </button>
+  );
+
   return (
-    <div>
-      {/* Panorama viewer */}
+    <div className="max-w-6xl mx-auto px-4 py-6">
+      {/* Viewer with floating toolbar */}
       <div
-        ref={containerRef}
-        className="w-full rounded-xl overflow-hidden bg-black"
-        style={{ height: "70vh" }}
-      />
+        className="relative rounded-2xl overflow-hidden bg-black"
+        style={{ height: "78vh" }}
+      >
+        <div ref={containerRef} className="w-full h-full" />
 
-      {/* Controls + Metadata */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-        {/* Controls */}
-        <div className="bg-surface rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-primary mb-3">Controls</h3>
+        {/* Floating toolbar */}
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 glass rounded-xl px-3 py-2 flex items-center gap-2">
+          {/* FOV slider */}
+          <button
+            onClick={() => handleHfovChange(Math.min(maxHfov, hfov + 10))}
+            title="Zoom out"
+            className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 text-lg transition-colors"
+          >
+            &minus;
+          </button>
+          <input
+            type="range"
+            min={30}
+            max={maxHfov}
+            value={hfov}
+            onChange={(e) => handleHfovChange(parseInt(e.target.value))}
+            className="w-20 sm:w-28 accent-primary"
+          />
+          <button
+            onClick={() => handleHfovChange(Math.max(30, hfov - 10))}
+            title="Zoom in"
+            className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 text-lg transition-colors"
+          >
+            +
+          </button>
+          <span className="text-xs text-white/50 w-8 text-center tabular-nums">
+            {Math.round(hfov)}&deg;
+          </span>
 
-          <div className="flex items-center gap-3 mb-3 text-sm">
-            <label className="flex items-center gap-1.5 whitespace-nowrap">
-              <input
-                type="checkbox"
-                checked={autoRotate}
-                onChange={(e) => handleAutoRotate(e.target.checked)}
-                className="accent-primary"
-              />
-              Auto-Rotate
-            </label>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.5}
-              value={rotateSpeed}
-              disabled={!autoRotate}
-              onChange={(e) => handleSpeedChange(parseFloat(e.target.value))}
-              className="flex-1 accent-primary"
-            />
-            <span className="text-muted w-8 text-right">
-              {rotateSpeed.toFixed(1)}
-            </span>
-          </div>
+          <div className="w-px h-6 bg-white/10 mx-1" />
 
-          <div className="flex items-center gap-3 mb-3 text-sm">
-            <label className="whitespace-nowrap">Field of View</label>
-            <input
-              type="range"
-              min={30}
-              max={maxHfov}
-              value={hfov}
-              onChange={(e) => handleHfovChange(parseInt(e.target.value))}
-              className="flex-1 accent-primary"
-            />
-            <span className="text-muted w-10 text-right">
-              {Math.round(hfov)}&deg;
-            </span>
-          </div>
-
-          <div className="flex gap-2 mt-4">
-            <button
-              onClick={() => viewerRef.current?.toggleFullscreen()}
-              className="px-4 py-2 bg-border text-foreground rounded-md text-sm hover:bg-primary transition-colors"
+          {/* Auto-rotate */}
+          <ToolbarButton
+            onClick={() => handleAutoRotate(!autoRotate)}
+            title="Auto-rotate"
+            active={autoRotate}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
             >
-              Fullscreen
-            </button>
-            <button
-              onClick={handleReset}
-              className="px-4 py-2 bg-border text-foreground rounded-md text-sm hover:bg-primary transition-colors"
-            >
-              Reset View
-            </button>
-          </div>
-        </div>
+              <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+            </svg>
+          </ToolbarButton>
 
-        {/* Metadata */}
-        <div className="bg-surface rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-primary mb-3">
-            Panorama Info
-          </h3>
-          <div className="text-sm leading-relaxed text-muted space-y-1">
-            {fov && (
-              <div>
-                <strong className="text-foreground">FOV:</strong>{" "}
-                {fov.haov.toFixed(1)}&deg; &times; {fov.vaov.toFixed(1)}&deg;
-              </div>
-            )}
-            {stitch?.mode && (
-              <div>
-                <strong className="text-foreground">Mode:</strong>{" "}
-                {stitch.mode}
-              </div>
-            )}
-            {stitch?.backend && (
-              <div>
-                <strong className="text-foreground">Backend:</strong>{" "}
-                {stitch.backend}
-              </div>
-            )}
-            {stitch?.final_size && (
-              <div>
-                <strong className="text-foreground">Size:</strong>{" "}
-                {stitch.final_size[0]} &times; {stitch.final_size[1]}
-              </div>
-            )}
-            {quality?.frames_stitched && (
-              <div>
-                <strong className="text-foreground">Frames:</strong>{" "}
-                {quality.frames_stitched} stitched
-              </div>
-            )}
-            {quality?.focal_length_35mm && (
-              <div>
-                <strong className="text-foreground">Focal:</strong>{" "}
-                {quality.focal_length_35mm}mm ({quality.focal_source})
-              </div>
-            )}
-            {timing?.total_seconds && (
-              <div>
-                <strong className="text-foreground">Time:</strong>{" "}
-                {timing.total_seconds.toFixed(1)}s total
-              </div>
-            )}
-          </div>
+          {/* Fullscreen */}
+          <ToolbarButton
+            onClick={() => viewerRef.current?.toggleFullscreen()}
+            title="Fullscreen"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+            </svg>
+          </ToolbarButton>
+
+          {/* Reset view */}
+          <ToolbarButton onClick={handleResetView} title="Reset view">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+          </ToolbarButton>
+
+          {/* Download */}
+          <ToolbarButton onClick={handleDownload} title="Download panorama">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </ToolbarButton>
+
+          {/* Info toggle */}
+          <ToolbarButton
+            onClick={() => setShowInfo(!showInfo)}
+            title="Panorama info"
+            active={showInfo}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="16" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+          </ToolbarButton>
         </div>
       </div>
 
+      {/* Info panel */}
+      {showInfo && (
+        <div
+          className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4"
+          style={{ animation: "fade-in 0.2s ease" }}
+        >
+          {fov && (
+            <StatCard
+              label="Field of View"
+              value={`${fov.haov.toFixed(0)}\u00B0 \u00D7 ${fov.vaov.toFixed(0)}\u00B0`}
+            />
+          )}
+          {stitch?.mode && (
+            <StatCard label="Stitch Mode" value={stitch.mode} />
+          )}
+          {stitch?.backend && (
+            <StatCard label="Backend" value={stitch.backend} capitalize />
+          )}
+          {stitch?.final_size && (
+            <StatCard
+              label="Resolution"
+              value={`${stitch.final_size[0]}\u00D7${stitch.final_size[1]}`}
+            />
+          )}
+          {quality?.frames_stitched && (
+            <StatCard
+              label="Frames"
+              value={`${quality.frames_stitched} stitched`}
+            />
+          )}
+          {quality?.focal_length_35mm && (
+            <StatCard
+              label="Focal Length"
+              value={`${quality.focal_length_35mm}mm`}
+            />
+          )}
+          {timing?.total_seconds && (
+            <StatCard
+              label="Processing"
+              value={`${timing.total_seconds.toFixed(1)}s`}
+            />
+          )}
+        </div>
+      )}
+
       {/* Warnings */}
       {warnings.length > 0 && (
-        <div className="bg-primary/10 border border-primary rounded-lg p-3 mt-4 text-sm text-pink-300">
+        <div className="bg-primary/10 border border-primary/30 rounded-lg p-3 mt-4 text-sm text-rose-300">
           {warnings.map((w, i) => (
             <div key={i}>&#9888; {w}</div>
           ))}
         </div>
       )}
 
-      {/* New panorama button */}
-      <div className="text-center mt-6">
+      {/* Action buttons */}
+      <div className="flex justify-center gap-3 mt-6">
+        <button
+          onClick={handleDownload}
+          className="px-6 py-2.5 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors text-sm font-medium"
+        >
+          Download Panorama
+        </button>
         <button
           onClick={onReset}
-          className="px-8 py-3 bg-border text-foreground rounded-md hover:bg-primary transition-colors"
+          className="px-6 py-2.5 bg-surface border border-border text-foreground rounded-lg hover:border-primary/50 transition-colors text-sm"
         >
-          Create Another Panorama
+          Create Another
         </button>
       </div>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  capitalize,
+}: {
+  label: string;
+  value: string;
+  capitalize?: boolean;
+}) {
+  return (
+    <div className="bg-surface rounded-lg p-3">
+      <p className="text-xs text-detail">{label}</p>
+      <p className={`text-sm font-medium mt-1 ${capitalize ? "capitalize" : ""}`}>
+        {value}
+      </p>
     </div>
   );
 }
