@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, request, send_file
 
 app = Flask(__name__)
 
@@ -88,9 +88,11 @@ def run_pipeline(job_id):
                 continue
             for keyword, label, pct in STAGE_MAP:
                 if keyword in line:
-                    q.put({"event": "progress", "data": {
+                    progress = {
                         "stage": label, "percent": pct, "detail": line,
-                    }})
+                    }
+                    job["progress"] = progress
+                    q.put({"event": "progress", "data": progress})
                     break
 
         proc.wait()
@@ -129,11 +131,6 @@ def run_pipeline(job_id):
 
 # --- Routes ---
 
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
 @app.route("/api/upload", methods=["POST"])
 def upload():
     cleanup_old_jobs()
@@ -161,6 +158,7 @@ def upload():
     jobs[job_id] = {
         "status": "processing",
         "progress_queue": queue.Queue(),
+        "progress": {"stage": "Starting pipeline...", "percent": 0, "detail": ""},
         "result": None,
         "output_dir": job_dir,
         "video_path": video_path,
@@ -197,13 +195,13 @@ def job_events(job_id):
     )
 
 
-@app.route("/api/jobs/<job_id>/result")
-def job_result(job_id):
+@app.route("/api/jobs/<job_id>/status")
+def job_status(job_id):
     if job_id not in jobs:
         return jsonify({"error": "Job not found"}), 404
     job = jobs[job_id]
     if job["result"] is None:
-        return jsonify({"status": "processing"}), 202
+        return jsonify({"status": "processing", "progress": job["progress"]})
     return jsonify(job["result"])
 
 

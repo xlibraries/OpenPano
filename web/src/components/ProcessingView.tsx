@@ -19,6 +19,7 @@ export default function ProcessingView({
   const [detail, setDetail] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());
+  const stopped = useRef(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -28,42 +29,44 @@ export default function ProcessingView({
   }, []);
 
   useEffect(() => {
-    const es = new EventSource(`/api/jobs/${jobId}/events`);
+    stopped.current = false;
 
-    es.addEventListener("progress", (e) => {
-      const data: ProgressData = JSON.parse(e.data);
-      setStage(data.stage);
-      setPercent(data.percent);
-      setDetail(data.detail);
-    });
+    const poll = () => {
+      if (stopped.current) return;
 
-    es.addEventListener("complete", (e) => {
-      es.close();
-      const result: PipelineResult = JSON.parse(e.data);
-      onComplete(result);
-    });
+      fetch(`/api/jobs/${jobId}/status`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (stopped.current) return;
 
-    es.addEventListener("error", () => {
-      es.close();
-      // Fallback: poll result endpoint
-      const poll = () => {
-        fetch(`/api/jobs/${jobId}/result`)
-          .then((r) => r.json())
-          .then((data) => {
-            if (data.status === "processing") {
-              setTimeout(poll, 2000);
-            } else if (data.status === "success") {
-              onComplete(data);
-            } else {
-              onError(data.error_message || "Processing failed");
+          if (data.status === "processing") {
+            const p: ProgressData = data.progress;
+            if (p) {
+              setStage(p.stage);
+              setPercent(p.percent);
+              setDetail(p.detail);
             }
-          })
-          .catch(() => onError("Lost connection to server"));
-      };
-      poll();
-    });
+            setTimeout(poll, 1500);
+          } else if (data.status === "success") {
+            onComplete(data);
+          } else if (data.status === "error") {
+            onError(data.error_message || "Processing failed");
+          } else {
+            setTimeout(poll, 1500);
+          }
+        })
+        .catch(() => {
+          if (!stopped.current) {
+            setTimeout(poll, 3000);
+          }
+        });
+    };
 
-    return () => es.close();
+    poll();
+
+    return () => {
+      stopped.current = true;
+    };
   }, [jobId, onComplete, onError]);
 
   return (
