@@ -149,13 +149,27 @@ def stitch_from_metadata(
 
     # ------------------------------------------------------------------
     # Pre-load all images and compute per-shot camera parameters
+    #
+    # Camera placement strategy: use targetVector (the mathematically
+    # perfect 45°-spaced grid) for projection, not capturedVector.
+    # Reason: capturedVector has ±3–5° IMU noise which causes blurring
+    # in the blend zone between adjacent shots.  The targetVector grid
+    # is exact, so adjacent shots meet at the correct boundary with no
+    # content mismatch.  The 3–5° capture error is absorbed inside each
+    # shot's "own" 80% central zone where there is no blending.
     # ------------------------------------------------------------------
-    shot_data = []   # list of dicts: fwd, right, up, tan_h, tan_v, img_arr, img_w, img_h
+    shot_data = []
     fov_h = None
+    brightness_sum = 0.0
+    brightness_count = 0
 
     for shot in shots:
         idx = shot["index"]
-        cv  = shot.get("capturedVector", {})
+
+        # Use capturedVector — actual capture direction, so content in the
+        # blend zone of adjacent shots shows the same physical area from the
+        # same actual angle, giving clean cross-fades without ghosting.
+        cv = shot.get("capturedVector") or shot.get("targetVector", {})
         fwd_vec = [cv.get("x", 0.0), cv.get("y", 0.0), cv.get("z", 1.0)]
 
         # Find image
@@ -172,6 +186,11 @@ def stitch_from_metadata(
         img = Image.open(img_path).convert("RGB")
         img_w, img_h = img.size
         img_arr = np.array(img, dtype=np.float32)
+
+        # Per-shot mean brightness for exposure normalisation
+        mean_brightness = float(img_arr.mean())
+        brightness_sum += mean_brightness
+        brightness_count += 1
 
         # FOV — determined once from the first image
         if fov_h is None:
@@ -192,29 +211,66 @@ def stitch_from_metadata(
             fwd=fwd, right=right, up=up,
             tan_h=tan_h, tan_v=tan_v,
             img_arr=img_arr, img_w=img_w, img_h=img_h,
+            mean_brightness=mean_brightness,
         ))
 
     if not shot_data:
         raise ValueError("No usable shots found")
 
-    logger.info("Loaded %d / %d shots", len(shot_data), len(shots))
+    global_mean = brightness_sum / brightness_count
+    logger.info("Loaded %d / %d shots  (global brightness=%.1f)",
+                len(shot_data), len(shots), global_mean)
+
+    # ------------------------------------------------------------------
+    # Per-shot exposure normalisation.
+    # Sample a 32×32 pixel patch at the centre of each shot's image and
+    # compute the mean luminance.  Derive a per-shot gain so all centre
+    # patches match the global mean.  Centre pixels are deepest inside the
+    # FOV, so they're free of edge vignetting and reliably represent the
+    # shot's exposure level.
+    # ------------------------------------------------------------------
+    for sd in shot_data:
+        arr = sd["img_arr"]
+        iw, ih = sd["img_w"], sd["img_h"]
+        cx, cy = iw // 2, ih // 2
+        patch = arr[cy - 16:cy + 16, cx - 16:cx + 16]
+        patch_mean = float(patch.mean()) if patch.size > 0 else sd["mean_brightness"]
+        raw_gain = (global_mean / patch_mean) if patch_mean > 1.0 else 1.0
+        # Cap gain to a plausible range — shots with very dark/bright centres
+        # (e.g. nadir/zenith or window-facing) would otherwise get extreme
+        # corrections that look worse than leaving the exposure as-is.
+        sd["gain"] = float(np.clip(raw_gain, 0.5, 2.0))
+        if abs(sd["gain"] - 1.0) > 0.05:
+            logger.info("Shot %d  centre=%.1f  raw_gain=%.3f  clamped=%.3f",
+                        sd["index"], patch_mean, raw_gain, sd["gain"])
 
     # ------------------------------------------------------------------
     # Build equirectangular canvas row-by-row to keep RAM manageable.
     #
-    # Strategy: winner-takes-all with a thin blend band at seams.
-    #   - Each pixel is owned by the shot whose centre vector is closest
-    #     (highest local_z), eliminating parallax ghosting.
-    #   - A narrow cosine-ramp blend zone (~15 % of half-FOV) is applied
-    #     right at the FOV boundary to soften hard cut lines.
+    # Blending strategy (hybrid):
+    #   Inner zone (d < INNER_ZONE): winner-takes-all — clean, no parallax
+    #     ghosting in the sharp centre content of each shot.
+    #   Blend zone (d >= INNER_ZONE, inside FOV): weighted average —
+    #     smoothly cross-fades between overlapping shots so exposure
+    #     differences don't create hard seam lines.
+    #
+    # With 45° shot spacing and 65° hFOV, adjacent shots overlap in a
+    # ~12.5° strip around each seam.  Setting INNER_ZONE=0.60 means the
+    # blend zone starts 19.5° from each shot centre, which fully covers
+    # that overlap strip and produces seamless transitions.
     # ------------------------------------------------------------------
-    best_weight = np.zeros((height, width), dtype=np.float32)
-    canvas      = np.zeros((height, width, 3), dtype=np.float32)
+    # Accumulator arrays for weighted-average blending
+    weight_acc = np.zeros((height, width),    dtype=np.float32)
+    canvas_acc = np.zeros((height, width, 3), dtype=np.float32)
+    # Best-weight map for winner-takes-all in the inner zone
+    best_wta   = np.zeros((height, width),    dtype=np.float32)
+    canvas_wta = np.zeros((height, width, 3), dtype=np.float32)
 
-    px_idx = np.arange(width, dtype=np.float64)
+    px_idx  = np.arange(width, dtype=np.float64)
     lon_row = (px_idx / width) * 2.0 * math.pi - math.pi   # (W,)
 
-    BLEND_BAND = 0.15   # cosine fade over outermost 15 % of the FOV radius
+    INNER_ZONE = 0.60   # d < this → winner-takes-all (no ghosting)
+    # Cosine ramp from INNER_ZONE (weight=1) to 1.0 (weight=0 at FOV edge)
 
     for row_start in range(0, height, chunk_rows):
         row_end  = min(row_start + chunk_rows, height)
@@ -231,14 +287,18 @@ def stitch_from_metadata(
         ray_z = cos_lat * np.cos(lon2d)
         rays  = np.stack([ray_x, ray_y, ray_z], axis=-1)   # (R, W, 3)
 
-        chunk_best   = best_weight[row_start:row_end]   # view into global array
-        chunk_canvas = canvas[row_start:row_end]
+        # Views into global arrays for this chunk
+        chunk_wta_best   = best_wta[row_start:row_end]
+        chunk_wta_canvas = canvas_wta[row_start:row_end]
+        chunk_w_acc      = weight_acc[row_start:row_end]
+        chunk_c_acc      = canvas_acc[row_start:row_end]
 
         for sd in shot_data:
             fwd, right, up = sd["fwd"], sd["right"], sd["up"]
             tan_h, tan_v   = sd["tan_h"], sd["tan_v"]
             img_arr        = sd["img_arr"]
             img_w, img_h   = sd["img_w"], sd["img_h"]
+            gain           = sd["gain"]
 
             local_z = rays @ fwd
             local_x = rays @ right
@@ -251,20 +311,16 @@ def stitch_from_metadata(
                 v = np.where(in_front, local_y / (local_z * tan_v), 2.0)
 
             in_fov = in_front & (u > -1.0) & (u < 1.0) & (v > -1.0) & (v < 1.0)
-
-            # Weight: 1.0 over the inner (1-BLEND_BAND) of the FOV,
-            # smooth cosine ramp to 0 at the boundary edge.
-            d = np.maximum(np.abs(u), np.abs(v))
-            t = np.clip((d - (1.0 - BLEND_BAND)) / BLEND_BAND, 0.0, 1.0)
-            weight = np.where(in_fov,
-                              0.5 * (1.0 + np.cos(math.pi * t)).astype(np.float32),
-                              0.0).astype(np.float32)
-
-            # Pixels where this shot beats the current winner
-            improve = in_fov & (weight > chunk_best)
-
-            if not improve.any():
+            if not in_fov.any():
                 continue
+
+            d = np.maximum(np.abs(u), np.abs(v))
+
+            # Cosine-ramp blend weight (1.0 at centre, 0.0 at FOV edge)
+            t = np.clip((d - INNER_ZONE) / (1.0 - INNER_ZONE), 0.0, 1.0)
+            weight = np.where(in_fov,
+                              (0.5 * (1.0 + np.cos(math.pi * t))).astype(np.float32),
+                              0.0).astype(np.float32)
 
             px_coord = np.clip((u + 1.0) / 2.0 * (img_w - 1), 0.0, img_w - 1.0)
             py_coord = np.clip((1.0 - v) / 2.0 * (img_h - 1), 0.0, img_h - 1.0)
@@ -281,18 +337,47 @@ def stitch_from_metadata(
                    + img_arr[py1, px0] * (1.0 - fx) * fy
                    + img_arr[py1, px1] * fx          * fy)
 
-            chunk_canvas[improve] = color[improve]
-            chunk_best[improve]   = weight[improve]
+            # Apply clamped exposure gain
+            if abs(gain - 1.0) > 0.01:
+                color = np.clip(color * gain, 0.0, 255.0)
+
+            # --- Inner zone: winner-takes-all ---
+            inner = in_fov & (d < INNER_ZONE)  # weight=1.0 in here
+            improve = inner & (weight > chunk_wta_best)
+            if improve.any():
+                chunk_wta_canvas[improve] = color[improve]
+                chunk_wta_best[improve]   = weight[improve]
+
+            # --- Blend zone: weighted accumulation ---
+            blend = in_fov & (d >= INNER_ZONE)
+            if blend.any():
+                w3 = weight[..., np.newaxis]
+                chunk_c_acc[blend]  += (color * w3)[blend]
+                chunk_w_acc[blend]  += weight[blend]
 
         logger.debug("Rows %d–%d complete", row_start, row_end - 1)
 
     # ------------------------------------------------------------------
-    # Save
+    # Merge WTA inner zone and weighted-average blend zone into final canvas
     # ------------------------------------------------------------------
-    valid = best_weight > 0.0
-    out   = canvas
+    inner_mask = best_wta > 0.0           # pixels covered by inner zone
+    blend_mask = weight_acc > 0.0         # pixels covered by blend zone
+    covered    = inner_mask | blend_mask
 
-    uncovered = int((~valid).sum())
+    canvas = np.zeros((height, width, 3), dtype=np.float32)
+    # Fill blend zone first (lower priority)
+    if blend_mask.any():
+        safe_w = np.where(blend_mask, weight_acc, 1.0)[..., np.newaxis]
+        canvas[blend_mask] = (canvas_acc / safe_w)[blend_mask]
+    # Overwrite with WTA inner zone (higher priority, no ghosting)
+    if inner_mask.any():
+        canvas[inner_mask] = canvas_wta[inner_mask]
+
+    # ------------------------------------------------------------------
+    # Coverage check
+    # ------------------------------------------------------------------
+    out = canvas
+    uncovered = int((~covered).sum())
     if uncovered:
         coverage_pct = 100.0 * (1.0 - uncovered / (height * width))
         logger.warning("%d pixels uncovered — sphere coverage %.1f%%",
