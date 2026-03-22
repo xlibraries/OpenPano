@@ -17,6 +17,10 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [stitchBackend, setStitchBackend] = useState("openpano");
   const [loadingDemo, setLoadingDemo] = useState<string | null>(null);
+  const [equirectangular, setEquirectangular] = useState(false);
+  const [equirectWidth, setEquirectWidth] = useState("4096");
+  const [maxFrames, setMaxFrames] = useState("80");
+  const [focalLength, setFocalLength] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const upload = useCallback(
@@ -30,6 +34,10 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
       const formData = new FormData();
       formData.append("video", file);
       formData.append("stitch_backend", stitchBackend);
+      formData.append("equirectangular", equirectangular ? "1" : "0");
+      formData.append("equirect_width", equirectWidth);
+      formData.append("max_frames", maxFrames);
+      if (focalLength.trim()) formData.append("focal_length", focalLength.trim());
       setUploading(true);
       setUploadPercent(0);
 
@@ -66,7 +74,7 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
       xhr.open("POST", "/api/upload");
       xhr.send(formData);
     },
-    [onJobStarted, stitchBackend]
+    [onJobStarted, stitchBackend, equirectangular, equirectWidth, maxFrames, focalLength]
   );
 
   const handleDemoClick = useCallback(
@@ -219,20 +227,119 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
           <summary className="px-4 py-3 cursor-pointer text-sm text-muted hover:text-foreground transition-colors select-none">
             Advanced options
           </summary>
-          <div className="px-4 pb-4">
-            <label className="block text-xs text-detail mb-1.5">
-              Stitching Backend
-            </label>
-            <select
-              value={stitchBackend}
-              onChange={(e) => setStitchBackend(e.target.value)}
-              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground"
-            >
-              <option value="hugin">
-                Hugin CLI (higher-quality equirect)
-              </option>
-              <option value="openpano">OpenPano engine</option>
-            </select>
+          <div className="px-4 pb-4 space-y-5">
+
+            {/* Output Format */}
+            <div>
+              <label className="block text-xs text-detail mb-2">Output Format</label>
+              <div className="flex rounded-md overflow-hidden border border-border text-sm">
+                <button
+                  type="button"
+                  onClick={() => setEquirectangular(false)}
+                  className={`flex-1 px-3 py-2 transition-colors ${!equirectangular ? "bg-primary text-white" : "bg-background text-muted hover:text-foreground"}`}
+                >
+                  Cylindrical
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEquirectangular(true)}
+                  className={`flex-1 px-3 py-2 transition-colors border-l border-border ${equirectangular ? "bg-primary text-white" : "bg-background text-muted hover:text-foreground"}`}
+                >
+                  Equirectangular 360°
+                </button>
+              </div>
+              <p className="text-xs text-detail mt-1.5">
+                {equirectangular
+                  ? "Full 2:1 sphere canvas — ready for 360° viewers like Pannellum."
+                  : "Cropped to actual coverage — best for partial sweeps."}
+              </p>
+            </div>
+
+            {/* Equirect Resolution — only shown when equirectangular */}
+            {equirectangular && (
+              <div>
+                <label className="block text-xs text-detail mb-2">Equirect Resolution</label>
+                <div className="flex rounded-md overflow-hidden border border-border text-sm">
+                  {[["2048", "2K"], ["4096", "4K"], ["8192", "8K"]].map(([val, label]) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setEquirectWidth(val)}
+                      className={`flex-1 px-3 py-2 transition-colors border-r border-border last:border-r-0 ${equirectWidth === val ? "bg-primary text-white" : "bg-background text-muted hover:text-foreground"}`}
+                    >
+                      {label}
+                      <span className="block text-[10px] opacity-70">{val}px</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Max Frames */}
+            <div>
+              <label className="block text-xs text-detail mb-2">Max Frames to Stitch</label>
+              <div className="flex rounded-md overflow-hidden border border-border text-sm">
+                {[["30", "30"], ["60", "60"], ["80", "80 ✦"], ["120", "120"]].map(([val, label]) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => setMaxFrames(val)}
+                    className={`flex-1 px-3 py-2 transition-colors border-r border-border last:border-r-0 ${maxFrames === val ? "bg-primary text-white" : "bg-background text-muted hover:text-foreground"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-detail mt-1.5">✦ default — more frames = higher quality but slower</p>
+            </div>
+
+            {/* Focal Length */}
+            <div>
+              <label className="block text-xs text-detail mb-2">
+                Focal Length Override <span className="text-detail/60">(optional)</span>
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="5"
+                  max="200"
+                  step="1"
+                  value={focalLength}
+                  onChange={(e) => setFocalLength(e.target.value)}
+                  placeholder="26"
+                  className="w-28 bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground placeholder:text-detail"
+                />
+                <span className="text-sm text-muted">mm (35mm equiv.)</span>
+              </div>
+              <p className="text-xs text-detail mt-1.5">Leave blank to auto-detect from video metadata.</p>
+            </div>
+
+            {/* Stitching Backend */}
+            <div>
+              <label className="block text-xs text-detail mb-2">Stitching Backend</label>
+              <div className="flex rounded-md overflow-hidden border border-border text-sm">
+                <button
+                  type="button"
+                  onClick={() => setStitchBackend("openpano")}
+                  className={`flex-1 px-3 py-2 transition-colors ${stitchBackend === "openpano" ? "bg-primary text-white" : "bg-background text-muted hover:text-foreground"}`}
+                >
+                  OpenPano
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStitchBackend("hugin")}
+                  className={`flex-1 px-3 py-2 transition-colors border-l border-border ${stitchBackend === "hugin" ? "bg-primary text-white" : "bg-background text-muted hover:text-foreground"}`}
+                >
+                  Hugin CLI
+                </button>
+              </div>
+              <p className="text-xs text-detail mt-1.5">
+                {stitchBackend === "hugin"
+                  ? "Requires pto_gen, cpfind, autooptimiser, nona, enblend on the server."
+                  : "Built-in C++ engine — fast, no extra dependencies."}
+              </p>
+            </div>
+
           </div>
         </details>
       </div>
@@ -304,7 +411,7 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
             </div>
             <p className="text-xs text-detail uppercase tracking-wider mb-2">Pro</p>
             <p className="text-3xl font-bold mb-1">
-              $12<span className="text-base font-normal text-muted">/mo</span>
+              $2.99<span className="text-base font-normal text-muted">/mo</span>
             </p>
             <p className="text-xs text-muted mb-6">per seat, billed annually</p>
             <ul className="text-sm text-muted space-y-2.5 mb-8 flex-1">

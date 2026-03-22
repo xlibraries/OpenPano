@@ -90,6 +90,15 @@ def run_pipeline(job_id):
     ]
     if ENGINE_ROOT:
         cmd.extend(["--project-root", ENGINE_ROOT])
+    if job.get("equirectangular"):
+        cmd.append("--equirectangular")
+        eq_width = job.get("equirect_width")
+        if eq_width:
+            cmd.extend(["--equirect-width", str(eq_width)])
+    if job.get("max_frames"):
+        cmd.extend(["--max-frames", str(job["max_frames"])])
+    if job.get("focal_length"):
+        cmd.extend(["--focal-length", str(job["focal_length"])])
 
     try:
         proc = subprocess.Popen(
@@ -168,6 +177,38 @@ def upload():
             "error": f"Invalid stitch backend '{stitch_backend}'. Valid options: {', '.join(sorted(VALID_STITCH_BACKENDS))}"
         }), 400
 
+    equirectangular = request.form.get("equirectangular", "0").strip() in ("1", "true", "yes")
+
+    equirect_width = None
+    raw_eq_width = request.form.get("equirect_width", "").strip()
+    if raw_eq_width:
+        try:
+            equirect_width = int(raw_eq_width)
+            if equirect_width not in (2048, 4096, 8192):
+                equirect_width = 4096
+        except ValueError:
+            equirect_width = 4096
+
+    max_frames = None
+    raw_max_frames = request.form.get("max_frames", "").strip()
+    if raw_max_frames:
+        try:
+            max_frames = int(raw_max_frames)
+            if not (1 <= max_frames <= 500):
+                max_frames = None
+        except ValueError:
+            max_frames = None
+
+    focal_length = None
+    raw_focal = request.form.get("focal_length", "").strip()
+    if raw_focal:
+        try:
+            focal_length = float(raw_focal)
+            if not (5.0 <= focal_length <= 200.0):
+                focal_length = None
+        except ValueError:
+            focal_length = None
+
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -183,6 +224,10 @@ def upload():
         "output_dir": job_dir,
         "video_path": video_path,
         "stitch_backend": stitch_backend,
+        "equirectangular": equirectangular,
+        "equirect_width": equirect_width,
+        "max_frames": max_frames,
+        "focal_length": focal_length,
     }
 
     thread = threading.Thread(target=run_pipeline, args=(job_id,), daemon=True)
