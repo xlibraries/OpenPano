@@ -27,6 +27,7 @@ import os
 
 import numpy as np
 from PIL import Image
+import cv2
 
 logger = logging.getLogger("stitch_metadata")
 
@@ -108,7 +109,121 @@ def _camera_basis(fwd_vec):
 # ---------------------------------------------------------------------------
 
 def stitch_from_metadata(
-    metadata_path: str,
+    metadata_pa
+  
+  # ---------------------------------------------------------------------------
+# Hybrid feature matching + metadata fusion
+# ---------------------------------------------------------------------------
+
+def _detect_orb_features(img_gray, mask=None, max_features=500):
+    """Detect ORB keypoints in an image (faster than SIFT, good enough for overlap detection)."""
+    try:
+        orb = cv2.ORB_create(nfeatures=max_features)
+        keypoints, descriptors = orb.detectAndCompute(img_gray, mask=mask)
+        return keypoints, descriptors
+    except Exception as e:
+        logger.warning(f"ORB detection failed: {e}")
+        return [], None
+
+def _match_features(desc1, desc2, ratio_threshold=0.75):
+    """Match features using BFMatcher with Lowe's ratio test."""
+    if desc1 is None or desc2 is None or len(desc1) < 4 or len(desc2) < 4:
+        return []
+    
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    matches = bf.knnMatch(desc1, desc2, k=2)
+    
+    # Lowe's ratio test
+    good_matches = []
+    for match_pair in matches:
+        if len(match_pair) == 2:
+            m, n = match_pair
+            if m.distance < ratio_threshold * n.distance:
+                good_matches.append(m)
+    
+    return good_matches
+  
+def _compute_overlap_mask(vec1, vec2, fov_rad, img_w, img_h, basis1, basis2, tan_h, tan_v):
+    """Create a mask highlighting the overlap region between two shots.
+    
+    Returns two masks: (mask1, mask2) - binary masks for img1 and img2.
+    """
+    # Angle between the two camera directions
+    angle_between = np.arccos(np.clip(np.dot(vec1, vec2), -1.0, 1.0))
+    
+    # No overlap if cameras are too far apart
+    if angle_between > fov_rad:
+        return None, None
+    
+    # Simple approach: mask the edge strip toward the other camera
+    mask1 = np.zeros((img_h, img_w), dtype=np.uint8)
+    mask2 = np.zeros((img_h, img_w), dtype=np.uint8)
+    
+    # Determine which edge is the overlap zone
+    # Project vec2 into camera1 local space to find which edge
+    local2_in1 = np.array([np.dot(vec2, basis1[1]), np.dot(vec2, basis1[2]), np.dot(vec2, basis1[0])])  # (right, up, fwd)
+    
+    # If vec2 is to the right of vec1, mask the right edge
+    if local2_in1[0] > 0:  # right side
+        mask1[:, int(img_w * 0.6):] = 255
+    else:  # left side
+        mask1[:, :int(img_w * 0.4)] = 255
+    
+    # Similar for mask2 (but inverted)
+    local1_in2 = np.array([np.dot(vec1, basis2[1]), np.dot(vec1, basis2[2]), np.dot(vec1, basis2[0])])
+    if local1_in2[0] > 0:
+        mask2[:, int(img_w * 0.6):] = 255
+    else:
+        mask2[:, :int(img_w * 0.4)] = 255
+    
+    return mask1, mask2
+  
+def _refine_placement_with_matches(shot1_data, shot2_data, matches, kp1, kp2, min_matches=20):
+    """Compute a small translation/rotation refinement based on feature matches.
+    
+    Returns (offset_yaw_deg, offset_pitch_deg) or (0, 0) if refinement fails.
+    """
+    if len(matches) < min_matches:
+        return 0.0, 0.0
+    
+    # Extract matched keypoint coordinates
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+    
+    try:
+        # Compute homography (perspective transform)
+        H, mask = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
+        
+        if H is None:
+            return 0.0, 0.0
+        
+        # Extract rough translation from homography center shift
+        img_w, img_h = shot1_data['img_w'], shot1_data['img_h']
+        center = np.array([[img_w / 2, img_h / 2]], dtype=np.float32)
+        warped_center = cv2.perspectiveTransform(center.reshape(-1, 1, 2), H).reshape(-1, 2)
+        
+        dx = warped_center[0, 0] - center[0, 0]
+        dy = warped_center[0, 1] - center[0, 1]
+        
+        # Convert pixel shift to angular shift (rough estimate)
+        # For a 77° hFOV and img_w pixels: 1 pixel ≈ 77 / img_w degrees
+        fov_h = shot1_data.get('fov_h', np.radians(77.0))
+        fov_v = shot1_data.get('fov_v', fov_h * img_h / img_w)
+        
+        offset_yaw_deg = (dx / img_w) * np.degrees(fov_h)
+        offset_pitch_deg = -(dy / img_h) * np.degrees(fov_v)  # negative because y-down
+        
+        # Sanity check: don't allow huge offsets (probably spurious matches)
+        if abs(offset_yaw_deg) > 15 or abs(offset_pitch_deg) > 15:
+            logger.warning(f"Rejecting large offset: yaw={offset_yaw_deg:.1f}°, pitch={offset_pitch_deg:.1f}°")
+            return 0.0, 0.0
+        
+        logger.info(f"Feature refinement: {len(matches)} matches → offset yaw={offset_yaw_deg:.2f}°, pitch={offset_pitch_deg:.2f}°")
+        return offset_yaw_deg, offset_pitch_deg
+        
+    except Exception as e:
+        logger.warning(f"Homography computation failed: {e}")
+        return 0.0, 0.0th: str,
     stills_dir: str,
     output_path: str,
     width: int = 4096,
