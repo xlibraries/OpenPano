@@ -257,6 +257,121 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
         <p className="text-primary text-center text-sm mb-8">{error}</p>
       )}
 
+      {/* Pricing Section */}
+      <div className="max-w-4xl mx-auto w-full px-4 mt-16 mb-12">
+        <h2
+          className="text-3xl font-bold text-center mb-3 bg-gradient-to-r from-rose-500 to-pink-500 bg-clip-text text-transparent"
+        >
+          Pricing
+        </h2>
+        <p className="text-muted text-center text-sm mb-10">
+          Start for free. Scale when you need to.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+          {/* Free */}
+          <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col">
+            <p className="text-xs text-detail uppercase tracking-wider mb-2">Free</p>
+            <p className="text-3xl font-bold mb-1">$0</p>
+            <p className="text-xs text-muted mb-6">forever</p>
+            <ul className="text-sm text-muted space-y-2.5 mb-8 flex-1">
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                3 panoramas per day
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Standard processing speed
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                720p max export
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Community support
+              </li>
+            </ul>
+            <button className="w-full py-2.5 border border-border rounded-lg text-sm text-foreground hover:border-primary/50 transition-colors">
+              Get Started
+            </button>
+          </div>
+
+          {/* Pro */}
+          <div className="bg-surface border-2 border-primary rounded-2xl p-6 flex flex-col relative">
+            <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-semibold px-3 py-1 rounded-full">
+              Popular
+            </div>
+            <p className="text-xs text-detail uppercase tracking-wider mb-2">Pro</p>
+            <p className="text-3xl font-bold mb-1">
+              $12<span className="text-base font-normal text-muted">/mo</span>
+            </p>
+            <p className="text-xs text-muted mb-6">per seat, billed annually</p>
+            <ul className="text-sm text-muted space-y-2.5 mb-8 flex-1">
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                50 panoramas per day
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Priority processing
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                4K export &amp; download
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Early access to new features
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Team workspace (up to 5)
+              </li>
+            </ul>
+            <button className="w-full py-2.5 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-hover transition-colors">
+              Start Free Trial
+            </button>
+          </div>
+
+          {/* Enterprise */}
+          <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col">
+            <p className="text-xs text-detail uppercase tracking-wider mb-2">Enterprise</p>
+            <p className="text-3xl font-bold mb-1">Custom</p>
+            <p className="text-xs text-muted mb-6">tailored to your org</p>
+            <ul className="text-sm text-muted space-y-2.5 mb-8 flex-1">
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Unlimited panoramas
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Fastest processing (dedicated GPU)
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                8K export &amp; raw output
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Early access + beta features
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Unlimited team seats
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary mt-0.5">&#10003;</span>
+                Dedicated support &amp; SLA
+              </li>
+            </ul>
+            <button className="w-full py-2.5 border border-border rounded-lg text-sm text-foreground hover:border-primary/50 transition-colors">
+              Contact Sales
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Footer spacer */}
       <div className="flex-1" />
       <footer className="text-center text-detail text-xs py-6">

@@ -44,8 +44,11 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   const stitch = result.stitch;
   const warnings = result.warnings || [];
 
-  const initialHfov = fov ? Math.min(100, fov.haov * 0.8) : 100;
+  // Zoom limits: keep it feeling panoramic
+  // minHfov prevents zooming in too tight, maxHfov shows the full pano width
+  const minHfov = fov ? Math.max(60, fov.haov * 0.4) : 60;
   const maxHfov = fov ? Math.min(fov.haov, 120) : 120;
+  const initialHfov = fov ? Math.min(100, fov.haov * 0.8) : 100;
 
   useEffect(() => {
     if (!containerRef.current || !stitch?.pannellum) return;
@@ -64,6 +67,8 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
       showFullscreenCtrl: false,
       compass: false,
       hfov: initialHfov,
+      minHfov: minHfov,
+      maxHfov: maxHfov,
     };
 
     if (fov) {
@@ -80,7 +85,7 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
       viewer.destroy();
       viewerRef.current = null;
     };
-  }, [stitch, fov, initialHfov]);
+  }, [stitch, fov, initialHfov, minHfov, maxHfov]);
 
   const handleAutoRotate = useCallback((checked: boolean) => {
     setAutoRotate(checked);
@@ -161,14 +166,14 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
           </button>
           <input
             type="range"
-            min={30}
+            min={minHfov}
             max={maxHfov}
             value={hfov}
             onChange={(e) => handleHfovChange(parseInt(e.target.value))}
             className="w-20 sm:w-28 accent-primary"
           />
           <button
-            onClick={() => handleHfovChange(Math.max(30, hfov - 10))}
+            onClick={() => handleHfovChange(Math.max(minHfov, hfov - 10))}
             title="Zoom in"
             className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 text-lg transition-colors"
           >
@@ -234,24 +239,6 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
             >
               <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
               <path d="M3 3v5h5" />
-            </svg>
-          </ToolbarButton>
-
-          {/* Download */}
-          <ToolbarButton onClick={handleDownload} title="Download panorama">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
           </ToolbarButton>
 
@@ -321,6 +308,21 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
               value={`${timing.total_seconds.toFixed(1)}s`}
             />
           )}
+          {/* Download — tucked in info for advanced users */}
+          <button
+            onClick={handleDownload}
+            className="bg-surface rounded-lg p-3 flex flex-col items-start hover:border-primary/50 border border-transparent transition-colors"
+          >
+            <p className="text-xs text-detail">Export</p>
+            <p className="text-sm font-medium mt-1 flex items-center gap-1.5">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Download JPG
+            </p>
+          </button>
         </div>
       )}
 
@@ -336,14 +338,8 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
       {/* Action buttons */}
       <div className="flex justify-center gap-3 mt-6">
         <button
-          onClick={handleDownload}
-          className="px-6 py-2.5 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors text-sm font-medium"
-        >
-          Download Panorama
-        </button>
-        <button
           onClick={onReset}
-          className="px-6 py-2.5 bg-surface border border-border text-foreground rounded-lg hover:border-primary/50 transition-colors text-sm"
+          className="px-6 py-2.5 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors text-sm font-medium"
         >
           Create Another
         </button>
