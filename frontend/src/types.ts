@@ -49,6 +49,10 @@ export interface PipelineResult {
       avoidShowingBackground?: boolean;
       minHfov?: number;
       maxHfov?: number;
+      minYaw?: number;
+      maxYaw?: number;
+      minPitch?: number;
+      maxPitch?: number;
     };
   };
   warnings?: string[];

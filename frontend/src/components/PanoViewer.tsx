@@ -44,20 +44,16 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   const stitch = result.stitch;
   const warnings = result.warnings || [];
 
-  // Use backend-provided FOV limits from Pannellum config, with sensible fallbacks.
-  // These are set tight enough that the user never sees panorama edges.
-  const pCfg = stitch?.pannellum;
-  const minHfov = (pCfg?.minHfov as number) ?? (fov ? Math.max(50, fov.haov * 0.4) : 50);
-  const maxHfov = (pCfg?.maxHfov as number) ?? (fov ? Math.min(fov.haov * 0.85, 120) : 120);
-  const initialHfov = Math.min(maxHfov, fov ? fov.haov * 0.7 : 100);
+  // Match the working config from 4f46f9c: let Pannellum handle
+  // yaw/pitch bounds dynamically from haov/vaov. Don't override.
+  const initialHfov = fov ? Math.min(100, fov.haov * 0.8) : 100;
+  const maxHfov = fov ? Math.min(fov.haov, 120) : 120;
 
   useEffect(() => {
     if (!containerRef.current || !stitch?.pannellum) return;
 
     const panoConfig = { ...stitch.pannellum };
     delete panoConfig.avoidShowingBackground;
-    const isPartialPano =
-      typeof panoConfig.haov === "number" && panoConfig.haov < 360;
 
     const config: Record<string, unknown> = {
       ...panoConfig,
@@ -70,18 +66,11 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
       showFullscreenCtrl: false,
       compass: false,
       hfov: initialHfov,
-      minHfov: minHfov,
-      maxHfov: maxHfov,
     };
 
     if (fov) {
-      if (isPartialPano) {
-        config.yaw = 0;
-        config.pitch = 0;
-      } else {
-        if (fov.center_yaw !== undefined) config.yaw = fov.center_yaw;
-        if (fov.center_pitch !== undefined) config.pitch = fov.center_pitch;
-      }
+      if (fov.center_yaw !== undefined) config.yaw = fov.center_yaw;
+      if (fov.center_pitch !== undefined) config.pitch = fov.center_pitch;
     }
 
     setHfov(initialHfov);
@@ -93,7 +82,7 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
       viewer.destroy();
       viewerRef.current = null;
     };
-  }, [stitch, fov, initialHfov, minHfov, maxHfov]);
+  }, [stitch, fov, initialHfov]);
 
   const handleAutoRotate = useCallback((checked: boolean) => {
     setAutoRotate(checked);
@@ -112,18 +101,11 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   const handleResetView = useCallback(() => {
     const v = viewerRef.current;
     if (!v) return;
-    const isPartialPano =
-      typeof stitch?.pannellum?.haov === "number" && stitch.pannellum.haov < 360;
     v.setHfov(initialHfov);
-    if (isPartialPano) {
-      v.setYaw(0);
-      v.setPitch(0);
-    } else {
-      v.setYaw(fov?.center_yaw ?? 0);
-      v.setPitch(fov?.center_pitch ?? 0);
-    }
+    v.setYaw(fov?.center_yaw ?? 0);
+    v.setPitch(fov?.center_pitch ?? 0);
     setHfov(initialHfov);
-  }, [initialHfov, fov, stitch]);
+  }, [initialHfov, fov]);
 
   const handleDownload = useCallback(() => {
     const panoUrl = result.stitch?.pannellum?.panorama;
@@ -181,14 +163,14 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
           </button>
           <input
             type="range"
-            min={minHfov}
+            min={30}
             max={maxHfov}
             value={hfov}
             onChange={(e) => handleHfovChange(parseInt(e.target.value))}
             className="w-20 sm:w-28 accent-primary"
           />
           <button
-            onClick={() => handleHfovChange(Math.max(minHfov, hfov - 10))}
+            onClick={() => handleHfovChange(Math.max(30, hfov - 10))}
             title="Zoom in"
             className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 text-lg transition-colors"
           >

@@ -1327,24 +1327,13 @@ def process_video(video_path, output_dir=None, project_root=None,
                 pannellum["haov"] = fov["haov"]
                 pannellum["vaov"] = fov["vaov"]
                 pannellum["vOffset"] = fov["center_pitch"]
-                # Constrain view strictly within the available frame area.
-                # Pad inward so the viewport never reveals edges/black borders.
-                # The padding must account for the current hfov — at max zoom out
-                # the viewport itself spans hfov degrees, so we shrink bounds by
-                # half the max visible hfov to keep edges hidden.
-                view_hfov = min(fov["haov"] * 0.8, 100)  # typical max viewing hfov
-                view_vfov = view_hfov * 0.5  # approximate vertical fov at that hfov
-                pitch_pad = max(view_vfov / 2, 5)
-                half_vaov = fov["vaov"] / 2
-                pannellum["minPitch"] = -(half_vaov - pitch_pad)
-                pannellum["maxPitch"] = half_vaov - pitch_pad
+                # Only set minHfov/maxHfov — let Pannellum dynamically constrain
+                # yaw/pitch from haov/vaov so viewport never exceeds the image.
+                # Do NOT set avoidShowingBackground (breaks touch) or static
+                # minYaw/maxYaw/minPitch/maxPitch (causes black edge gaps).
                 if fov["haov"] < 360:
-                    yaw_pad = max(view_hfov / 2, 10)
-                    half_haov = fov["haov"] / 2
-                    pannellum["minYaw"] = -(half_haov - yaw_pad)
-                    pannellum["maxYaw"] = half_haov - yaw_pad
-                    pannellum["minHfov"] = min(50, fov["haov"] * 0.6)
-                    pannellum["maxHfov"] = fov["haov"] * 0.85
+                    pannellum["minHfov"] = min(50, fov["haov"])
+                    pannellum["maxHfov"] = fov["haov"]
         stitch_info["pannellum"] = pannellum
 
         result = {
