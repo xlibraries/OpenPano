@@ -227,7 +227,7 @@ def _refine_placement_with_matches(shot1_data, shot2_data, matches, kp1, kp2, mi
     stills_dir: str,
     output_path: str,
     width: int = 4096,
-    default_fov_deg: float = 77.0.0,
+    default_fov_deg: float = 77.0,
     chunk_rows: int = 256,
 ) -> dict:
     """Stitch a PanoCraft photo-sphere capture into an equirectangular panorama.
