@@ -105,13 +105,6 @@ def _camera_basis(fwd_vec):
 
 
 # ---------------------------------------------------------------------------
-# Core stitcher
-# ---------------------------------------------------------------------------
-
-def stitch_from_metadata(
-    metadata_pa
-  
-  # ---------------------------------------------------------------------------
 # Hybrid feature matching + metadata fusion
 # ---------------------------------------------------------------------------
 
@@ -223,7 +216,15 @@ def _refine_placement_with_matches(shot1_data, shot2_data, matches, kp1, kp2, mi
         
     except Exception as e:
         logger.warning(f"Homography computation failed: {e}")
-        return 0.0, 0.0th: str,
+        return 0.0, 0.0
+
+
+# ---------------------------------------------------------------------------
+# Core stitcher
+# ---------------------------------------------------------------------------
+
+def stitch_from_metadata(
+    metadata_path: str,
     stills_dir: str,
     output_path: str,
     width: int = 4096,
