@@ -8,6 +8,47 @@ OpenPano is a panorama stitching program written in C++ from scratch (without an
 described in the paper [Automatic Panoramic Image Stitching using Invariant Features](http://matthewalunbrown.com/papers/ijcv2007.pdf),
 which is also the one used by [AutoStitch](http://matthewalunbrown.com/autostitch/autostitch.html).
 
+## Current Layout
+
+This repository is currently organized as:
+
+- `engine/` — the stitching pipeline and C++ engine
+- `backend/` — the Flask API that runs the engine as a subprocess
+- `frontend/` — the web UI / viewer
+
+If you are running the app locally with the newer structure, these are the most useful docs:
+
+- [engine/README.md](/Users/xlib/Documents/OpenPano/engine/README.md)
+- [backend/README.md](/Users/xlib/Documents/OpenPano/backend/README.md)
+- [frontend/README.md](/Users/xlib/Documents/OpenPano/frontend/README.md)
+
+## Local Development
+
+### Run the Backend with Hugin as Default
+
+The Hugin CLI tools are installed in the `hugin-cli` micromamba environment and are auto-detected from:
+
+```bash
+/Users/xlib/micromamba/envs/hugin-cli/bin
+```
+
+Start the backend with Hugin as the default stitcher:
+
+```bash
+cd backend
+ENGINE_SCRIPT=../engine/video2pano.py \
+ENGINE_ROOT=../engine \
+ENGINE_DEFAULT_STITCH_BACKEND=hugin \
+python3 server.py
+```
+
+Then run the frontend in another terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
 ## Installation
 
 We need the following dependencies:

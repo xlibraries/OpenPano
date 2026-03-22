@@ -9,6 +9,7 @@ export default function UploadZone({ onJobStarted }: UploadZoneProps) {
   const [uploading, setUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [stitchBackend, setStitchBackend] = useState("openpano");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const upload = useCallback(
@@ -21,6 +22,7 @@ export default function UploadZone({ onJobStarted }: UploadZoneProps) {
 
       const formData = new FormData();
       formData.append("video", file);
+      formData.append("stitch_backend", stitchBackend);
       setUploading(true);
       setUploadPercent(0);
 
@@ -55,11 +57,27 @@ export default function UploadZone({ onJobStarted }: UploadZoneProps) {
       xhr.open("POST", "/api/upload");
       xhr.send(formData);
     },
-    [onJobStarted]
+    [onJobStarted, stitchBackend]
   );
 
   return (
     <div className="max-w-xl mx-auto">
+      <div className="bg-surface rounded-xl p-4 mb-4">
+        <label className="block text-sm text-muted mb-2">Stitching Backend</label>
+        <select
+          value={stitchBackend}
+          onChange={(e) => setStitchBackend(e.target.value)}
+          className="w-full bg-background border border-border rounded-md px-3 py-2 text-foreground"
+        >
+          <option value="hugin">Hugin CLI (higher-quality equirect export)</option>
+          <option value="openpano">OpenPano engine</option>
+        </select>
+        <p className="text-detail text-xs mt-2">
+          Hugin requires `pto_gen`, `cpfind`, `autooptimiser`, `pano_modify`, `nona`, and `enblend`
+          to be installed on the backend machine.
+        </p>
+      </div>
+
       <div
         className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors ${
           dragOver

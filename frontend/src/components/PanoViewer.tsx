@@ -204,6 +204,12 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
                 {stitch.mode}
               </div>
             )}
+            {stitch?.backend && (
+              <div>
+                <strong className="text-foreground">Backend:</strong>{" "}
+                {stitch.backend}
+              </div>
+            )}
             {stitch?.final_size && (
               <div>
                 <strong className="text-foreground">Size:</strong>{" "}

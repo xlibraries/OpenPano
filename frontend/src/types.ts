@@ -30,6 +30,7 @@ export interface PipelineResult {
     final_size: [number, number];
     stitched_size: [number, number];
     duration_seconds: number;
+    backend?: string;
     mode: string;
     projection: string;
     fov?: {
@@ -44,6 +45,8 @@ export interface PipelineResult {
       autoLoad: boolean;
       haov?: number;
       vaov?: number;
+      vOffset?: number;
+      avoidShowingBackground?: boolean;
       minHfov?: number;
       maxHfov?: number;
     };

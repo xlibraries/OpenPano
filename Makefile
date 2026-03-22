@@ -20,7 +20,7 @@ dev:
 	@echo "Run in separate terminals:"
 	@echo ""
 	@echo "  Backend:"
-	@echo "    cd backend && ENGINE_SCRIPT=../engine/video2pano.py ENGINE_ROOT=../engine python3 server.py"
+	@echo "    cd backend && ENGINE_SCRIPT=../engine/video2pano.py ENGINE_ROOT=../engine ENGINE_DEFAULT_STITCH_BACKEND=hugin python3 server.py"
 	@echo ""
 	@echo "  Frontend:"
 	@echo "    cd frontend && npm run dev"

@@ -116,6 +116,7 @@ Stitch options (passed to video2pano.py):
   -o, --output-dir DIR          Output directory (default: auto temp dir)
   -c, --config FILE             Config file (default: video2pano.conf)
   --focal-length MM             Override focal length in 35mm equivalent
+  --stitcher-backend NAME       Stitch backend: openpano or hugin
   --min-frames N                Minimum sharp frames required (default: 8)
   --max-frames N                Maximum frames to stitch (default: 80)
   --keep-frames                 Keep extracted frames after stitching

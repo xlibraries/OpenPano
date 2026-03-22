@@ -23,6 +23,8 @@ ENGINE_ROOT = os.path.abspath(_engine_root) if _engine_root else None
 JOBS_DIR = os.environ.get(
     "JOBS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
 )
+DEFAULT_STITCH_BACKEND = os.environ.get("ENGINE_DEFAULT_STITCH_BACKEND", "openpano")
+VALID_STITCH_BACKENDS = {"openpano", "hugin"}
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
@@ -40,6 +42,14 @@ STAGE_MAP = [
     ("Config:", "Configuring stitcher", 50),
     ("Running stitcher", "Stitching panorama", 55),
     ("mode failed", "Retrying alternate mode", 60),
+    ("Hugin project:", "Preparing Hugin project", 50),
+    ("Hugin control points:", "Finding control points", 58),
+    ("Hugin optimize:", "Optimizing panorama", 66),
+    ("Hugin modify:", "Preparing equirect output", 72),
+    ("Hugin remap:", "Remapping panorama", 78),
+    ("Hugin blend:", "Blending panorama", 86),
+    ("Hugin export:", "Exporting panorama", 92),
+    ("Hugin stitching complete", "Stitch complete", 95),
     ("Stitching complete", "Stitch complete", 85),
     ("Cylinder FOV", "Computing FOV", 90),
     ("Equirectangular output", "Formatting output", 95),
@@ -69,12 +79,14 @@ def run_pipeline(job_id):
     q = job["progress_queue"]
     output_dir = job["output_dir"]
     video_path = job["video_path"]
+    stitch_backend = job["stitch_backend"]
 
     cmd = [
         ENGINE_PYTHON, ENGINE_SCRIPT,
         video_path,
         "-o", output_dir,
         "-v",
+        "--stitcher-backend", stitch_backend,
     ]
     if ENGINE_ROOT:
         cmd.extend(["--project-root", ENGINE_ROOT])
@@ -150,6 +162,12 @@ def upload():
             "error": f"Invalid file type '.{ext}'. Accepted: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
         }), 400
 
+    stitch_backend = request.form.get("stitch_backend", DEFAULT_STITCH_BACKEND).strip().lower()
+    if stitch_backend not in VALID_STITCH_BACKENDS:
+        return jsonify({
+            "error": f"Invalid stitch backend '{stitch_backend}'. Valid options: {', '.join(sorted(VALID_STITCH_BACKENDS))}"
+        }), 400
+
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -164,6 +182,7 @@ def upload():
         "result": None,
         "output_dir": job_dir,
         "video_path": video_path,
+        "stitch_backend": stitch_backend,
     }
 
     thread = threading.Thread(target=run_pipeline, args=(job_id,), daemon=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""video2pano.py - Convert video to panorama using OpenPano.
+"""video2pano.py - Convert video to panorama using selectable stitcher backends.
 
 Extracts frames from a video, scores them for quality/sharpness,
 selects the best sequential frames, and stitches them into a panorama.
@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,20 @@ import time
 from pathlib import Path
 
 logger = logging.getLogger("video2pano")
+
+HUGIN_REQUIRED_TOOLS = (
+    "pto_gen",
+    "cpfind",
+    "autooptimiser",
+    "pano_modify",
+    "nona",
+    "enblend",
+)
+DEFAULT_HUGIN_ENV_PATHS = (
+    os.path.expanduser("~/micromamba/envs/hugin-cli/bin"),
+    os.path.expanduser("~/mambaforge/envs/hugin-cli/bin"),
+    os.path.expanduser("~/miniforge3/envs/hugin-cli/bin"),
+)
 
 # --- Exit codes ---
 EXIT_SUCCESS = 0
@@ -217,6 +232,66 @@ class QualityError(Video2PanoError):
 
 class StitcherError(Video2PanoError):
     pass
+
+
+def _run_checked(cmd, error_code, step_name, cwd=None):
+    """Run a subprocess command and raise StitcherError on failure."""
+    logger.debug("%s command: %s", step_name, " ".join(shlex.quote(part) for part in cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    combined_output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        raise StitcherError(
+            f"{step_name} failed",
+            error_code,
+            {
+                "exit_code": result.returncode,
+                "command": cmd,
+                "output": combined_output[-4000:],
+            },
+        )
+    return result
+
+
+def _require_tools(tools, error_code, install_hint):
+    """Ensure required external tools exist on PATH."""
+    missing = [tool for tool in tools if not _resolve_tool(tool)]
+    if missing:
+        raise StitcherError(
+            f"Missing required tools: {', '.join(missing)}. {install_hint}",
+            error_code,
+            {"missing_tools": missing},
+        )
+
+
+def _candidate_hugin_bin_dirs():
+    """Return candidate directories containing Hugin CLI tools."""
+    candidates = []
+    env_dir = os.environ.get("HUGIN_BIN_DIR")
+    if env_dir:
+        candidates.append(env_dir)
+    for path in DEFAULT_HUGIN_ENV_PATHS:
+        if path not in candidates:
+            candidates.append(path)
+    return candidates
+
+
+def _resolve_tool(tool):
+    """Resolve a tool from PATH or known Hugin env locations."""
+    resolved = shutil.which(tool)
+    if resolved:
+        return resolved
+    for bin_dir in _candidate_hugin_bin_dirs():
+        candidate = os.path.join(bin_dir, tool)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _focal_mm_to_hfov_deg(focal_length_mm):
+    """Convert 35mm-equivalent focal length to horizontal field of view."""
+    if not focal_length_mm or focal_length_mm <= 0:
+        return None
+    return math.degrees(2.0 * math.atan(36.0 / (2.0 * focal_length_mm)))
 
 
 # --- Video probing ---
@@ -663,6 +738,199 @@ def run_stitcher(stitcher_binary, frame_paths, working_dir, min_connected=8):
     }
 
 
+def _parse_hugin_panorama(project_path):
+    """Extract panorama width / height / HFOV from a .pto project."""
+    try:
+        with open(project_path, "r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line.startswith("p "):
+                    continue
+                width_match = re.search(r"\bw(\d+)\b", line)
+                height_match = re.search(r"\bh(\d+)\b", line)
+                hfov_match = re.search(r"\bv([-\d.]+)\b", line)
+                if width_match and height_match and hfov_match:
+                    return {
+                        "width": int(width_match.group(1)),
+                        "height": int(height_match.group(1)),
+                        "hfov_deg": float(hfov_match.group(1)),
+                    }
+    except OSError:
+        return None
+    return None
+
+
+def _proj_range_from_hugin_project(project_path):
+    """Approximate equirectangular projection range from a Hugin project."""
+    pano = _parse_hugin_panorama(project_path)
+    if not pano or pano["width"] <= 0 or pano["height"] <= 0:
+        return None
+
+    haov_rad = math.radians(max(0.0, min(360.0, pano["hfov_deg"])))
+    vaov_rad = min(math.pi, haov_rad * pano["height"] / pano["width"])
+    return {
+        "min_lon": -haov_rad / 2,
+        "max_lon": haov_rad / 2,
+        "min_lat": -vaov_rad / 2,
+        "max_lat": vaov_rad / 2,
+    }
+
+
+def run_hugin_stitcher(frame_paths, working_dir, focal_length_mm=None):
+    """Run a Hugin CLI pipeline on the selected frames.
+
+    Uses the documented command-line flow:
+    pto_gen -> cpfind -> autooptimiser -> pano_modify -> nona -> enblend.
+    Returns the same shape as run_stitcher().
+    """
+    _require_tools(
+        HUGIN_REQUIRED_TOOLS,
+        "HUGIN_NOT_INSTALLED",
+        "Install Hugin command-line tools and ensure they are on PATH.",
+    )
+    _require_tools(("ffmpeg",), "FFMPEG_MISSING", "Install ffmpeg and ensure it is on PATH.")
+    hugin_tools = {tool: _resolve_tool(tool) for tool in HUGIN_REQUIRED_TOOLS}
+    ffmpeg = _resolve_tool("ffmpeg")
+
+    project_0 = os.path.join(working_dir, "hugin_00_initial.pto")
+    project_1 = os.path.join(working_dir, "hugin_10_cpfind.pto")
+    project_2 = os.path.join(working_dir, "hugin_20_optimized.pto")
+    project_3 = os.path.join(working_dir, "hugin_30_equirect.pto")
+    remap_prefix = os.path.join(working_dir, "hugin_remap")
+    blended_tif = os.path.join(working_dir, "hugin_blended.tif")
+    output_file = os.path.join(working_dir, "hugin_out.jpg")
+
+    t0 = time.time()
+
+    logger.info("Hugin project: generating project for %d frames...", len(frame_paths))
+    pto_cmd = [hugin_tools["pto_gen"], "-o", project_0]
+    input_hfov = _focal_mm_to_hfov_deg(focal_length_mm)
+    if input_hfov:
+        pto_cmd += ["-f", f"{input_hfov:.3f}"]
+    pto_cmd += frame_paths
+    _run_checked(pto_cmd, "HUGIN_PROJECT_FAILED", "Hugin project generation", cwd=working_dir)
+
+    logger.info("Hugin control points: running cpfind...")
+    _run_checked(
+        [hugin_tools["cpfind"], "--multirow", "-o", project_1, project_0],
+        "HUGIN_CPFIND_FAILED",
+        "Hugin control point search",
+        cwd=working_dir,
+    )
+
+    logger.info("Hugin optimize: running autooptimiser...")
+    _run_checked(
+        [hugin_tools["autooptimiser"], "-a", "-l", "-s", "-m", "-o", project_2, project_1],
+        "HUGIN_OPTIMIZE_FAILED",
+        "Hugin optimization",
+        cwd=working_dir,
+    )
+
+    logger.info("Hugin modify: forcing equirectangular projection with auto canvas/crop...")
+    _run_checked(
+        [
+            hugin_tools["pano_modify"],
+            "--projection=2",
+            "--center",
+            "--straighten",
+            "--canvas=AUTO",
+            "--crop=AUTO",
+            "-o",
+            project_3,
+            project_2,
+        ],
+        "HUGIN_MODIFY_FAILED",
+        "Hugin panorama modification",
+        cwd=working_dir,
+    )
+
+    logger.info("Hugin remap: rendering panorama layers with nona...")
+    _run_checked(
+        [hugin_tools["nona"], "-m", "TIFF_m", "-o", remap_prefix, project_3],
+        "HUGIN_NONA_FAILED",
+        "Hugin remap",
+        cwd=working_dir,
+    )
+
+    remap_files = sorted(str(path) for path in Path(working_dir).glob("hugin_remap*.tif"))
+    if not remap_files:
+        raise StitcherError(
+            "Hugin remap produced no TIFF layers",
+            "HUGIN_NONA_FAILED",
+        )
+
+    remaps_used = len(remap_files)
+    blend_stdout = ""
+    blend_stderr = ""
+    for step in (1, 2, 3, 4):
+        subset = remap_files[::step]
+        remaps_used = len(subset)
+        logger.info(
+            "Hugin blend: blending %d remapped layers with enblend%s...",
+            remaps_used,
+            "" if step == 1 else f" (retry every {step}th layer)",
+        )
+        result = subprocess.run(
+            [hugin_tools["enblend"], "-o", blended_tif, *subset],
+            capture_output=True,
+            text=True,
+            cwd=working_dir,
+        )
+        blend_stdout = result.stdout or ""
+        blend_stderr = result.stderr or ""
+        if result.returncode == 0:
+            break
+        combined = blend_stdout + blend_stderr
+        if "excessive image overlap detected" in combined and step < 4:
+            logger.warning(
+                "Hugin blend reported excessive overlap with %d layers; retrying with sparser subset...",
+                remaps_used,
+            )
+            continue
+        raise StitcherError(
+            "Hugin blending failed",
+            "HUGIN_ENBLEND_FAILED",
+            {
+                "exit_code": result.returncode,
+                "command": [hugin_tools["enblend"], "-o", blended_tif, *subset],
+                "output": combined[-4000:],
+            },
+        )
+
+    logger.info("Hugin export: converting stitched TIFF to JPEG...")
+    _run_checked(
+        [ffmpeg, "-y", "-i", blended_tif, "-qscale:v", "2", output_file],
+        "HUGIN_EXPORT_FAILED",
+        "Hugin export conversion",
+        cwd=working_dir,
+    )
+
+    pano = _parse_hugin_panorama(project_3)
+    proj_range = _proj_range_from_hugin_project(project_3)
+
+    for path in remap_files:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    try:
+        os.remove(blended_tif)
+    except OSError:
+        pass
+
+    duration = time.time() - t0
+    logger.info("Hugin stitching complete in %.1fs, output: %s", duration, output_file)
+    return {
+        "success": True,
+        "output_path": output_file,
+        "final_size": [pano["width"], pano["height"]] if pano else None,
+        "proj_range": proj_range,
+        "duration_seconds": round(duration, 2),
+        "frames_used": remaps_used,
+        "blend_output": (blend_stdout + blend_stderr)[-4000:],
+    }
+
+
 # --- Equirectangular formatting ---
 
 def compute_fov(proj_range):
@@ -812,7 +1080,8 @@ def format_equirectangular(input_path, output_path, proj_range, equirect_width=4
 def process_video(video_path, output_dir=None, project_root=None,
                   min_frames=None, max_frames=None, keep_frames=False,
                   focal_length=None, config_path=None,
-                  equirectangular=False, equirect_width=4096):
+                  equirectangular=False, equirect_width=4096,
+                  stitcher_backend="openpano"):
     """Main pipeline: video -> frames -> score -> select -> stitch -> panorama.
 
     Returns a complete result dict suitable for JSON serialization.
@@ -880,39 +1149,57 @@ def process_video(video_path, output_dir=None, project_root=None,
         quality["focal_source"] = ("metadata" if video_info.get("focal_length_35mm")
                                    else "default")
 
-        # 6. Stitch — strategy depends on whether we know the focal length.
-        #    Known focal: try CYLINDER first (flat projection, needs accurate focal),
-        #    Unknown focal: try ESTIMATE_CAMERA first (can estimate focal internally).
+        # 6. Stitch using the selected backend.
         t0 = time.time()
         stitch_result = None
         stitch_mode = None
-        focal_known = quality["focal_source"] == "metadata" or focal_length is not None
         vw, vh = video_info["width"], video_info["height"]
         # If video is rotated, effective dims are swapped
         if abs(video_info["rotation"]) in (90, 270):
             vw, vh = vh, vw
 
-        config_kwargs = dict(cfg=cfg, focal_length_mm=focal_mm, video_width=vw, video_height=vh,
-                             num_frames=len(selected_paths))
-
-        if focal_known:
-            modes_to_try = [("cylinder", True), ("estimate_camera", False)]
+        if stitcher_backend == "hugin":
+            stitch_result = run_hugin_stitcher(
+                selected_paths,
+                output_dir,
+                focal_length_mm=focal_mm,
+            )
+            stitch_mode = "hugin"
         else:
-            modes_to_try = [("estimate_camera", False), ("cylinder", True)]
+            # OpenPano strategy depends on whether we know the focal length.
+            # Known focal: try CYLINDER first (flat projection, needs accurate focal),
+            # Unknown focal: try ESTIMATE_CAMERA first (can estimate focal internally).
+            focal_known = quality["focal_source"] == "metadata" or focal_length is not None
+            config_kwargs = dict(
+                cfg=cfg,
+                focal_length_mm=focal_mm,
+                video_width=vw,
+                video_height=vh,
+                num_frames=len(selected_paths),
+            )
 
-        for mode_name, use_cyl in modes_to_try:
-            generate_config(output_dir, use_cylinder=use_cyl, **config_kwargs)
-            try:
-                stitch_result = run_stitcher(stitcher_binary, selected_paths, output_dir,
-                                             min_connected=min_frames)
-                stitch_mode = mode_name
-                break
-            except StitcherError as e:
-                logger.warning("%s mode failed (%s), trying next mode...",
-                              mode_name.upper(), e.error_code)
-                out_file = os.path.join(output_dir, "out.jpg")
-                if os.path.exists(out_file):
-                    os.remove(out_file)
+            if focal_known:
+                modes_to_try = [("cylinder", True), ("estimate_camera", False)]
+            else:
+                modes_to_try = [("estimate_camera", False), ("cylinder", True)]
+
+            for mode_name, use_cyl in modes_to_try:
+                generate_config(output_dir, use_cylinder=use_cyl, **config_kwargs)
+                try:
+                    stitch_result = run_stitcher(
+                        stitcher_binary,
+                        selected_paths,
+                        output_dir,
+                        min_connected=min_frames,
+                    )
+                    stitch_mode = mode_name
+                    break
+                except StitcherError as e:
+                    logger.warning("%s mode failed (%s), trying next mode...",
+                                  mode_name.upper(), e.error_code)
+                    out_file = os.path.join(output_dir, "out.jpg")
+                    if os.path.exists(out_file):
+                        os.remove(out_file)
 
         if stitch_result is None:
             raise StitcherError("All stitching modes failed", "STITCH_FAILED")
@@ -960,10 +1247,16 @@ def process_video(video_path, output_dir=None, project_root=None,
         warnings = []
         frames_used = stitch_result.get("frames_used", len(selected_paths))
         if frames_used < len(selected_paths):
-            warnings.append(
-                f"Only {frames_used}/{len(selected_paths)} frames were stitchable "
-                "(chain broke at a blurry transition)"
-            )
+            if stitcher_backend == "hugin":
+                warnings.append(
+                    f"Hugin reduced blend input to {frames_used}/{len(selected_paths)} layers "
+                    "to avoid excessive overlap"
+                )
+            else:
+                warnings.append(
+                    f"Only {frames_used}/{len(selected_paths)} frames were stitchable "
+                    "(chain broke at a blurry transition)"
+                )
         quality["frames_stitched"] = frames_used
         if quality["sharpness_pass_rate"] < 0.3:
             warnings.append(
@@ -979,6 +1272,7 @@ def process_video(video_path, output_dir=None, project_root=None,
             "final_size": equirect_size or stitch_result["final_size"],
             "stitched_size": stitch_result["final_size"],
             "duration_seconds": stitch_result["duration_seconds"],
+            "backend": stitcher_backend,
             "mode": stitch_mode,
             "projection": "equirectangular",
         }
@@ -1024,7 +1318,7 @@ def process_video(video_path, output_dir=None, project_root=None,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert video to panorama using OpenPano",
+        description="Convert video to panorama using selectable stitcher backends",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Output: JSON result on stdout. Progress on stderr.\n"
                "Exit codes: 0=success, 1=quality too low, 2=input error, "
@@ -1045,6 +1339,8 @@ def main():
                         help="Output as full 2:1 equirectangular image (best for true 360 export workflows)")
     parser.add_argument("--equirect-width", type=int, default=4096,
                         help="Width of full equirectangular output (default: 4096, height=width/2)")
+    parser.add_argument("--stitcher-backend", choices=("openpano", "hugin"), default="openpano",
+                        help="Stitching backend to use (default: openpano)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep extracted frames after stitching")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output on stderr")
     args = parser.parse_args()
@@ -1072,6 +1368,7 @@ def main():
             config_path=args.config,
             equirectangular=args.equirectangular,
             equirect_width=args.equirect_width,
+            stitcher_backend=args.stitcher_backend,
         )
         exit_code = EXIT_SUCCESS
 
