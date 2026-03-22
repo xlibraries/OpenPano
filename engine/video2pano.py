@@ -39,6 +39,7 @@ HUGIN_REQUIRED_TOOLS = (
     "nona",
     "enblend",
 )
+FULL_EQUIRECT_MIN_HAOV_DEG = 350.0
 DEFAULT_HUGIN_ENV_PATHS = (
     os.path.expanduser("~/micromamba/envs/hugin-cli/bin"),
     os.path.expanduser("~/mambaforge/envs/hugin-cli/bin"),
@@ -476,7 +477,7 @@ def _laplacian_variance(image_path):
 def score_frames(frame_paths, video_info, cfg):
     """Score all frames for sharpness.
 
-    Uses Laplacian variance when OpenCV is available, falling back to file size otherwise.
+    Uses file size (fast, adaptive) and Laplacian variance (precise, if cv2 available).
     The file size threshold adapts to scene brightness by using both a resolution-scaled
     minimum and a fraction of the median file size — whichever is lower.
     Returns list of dicts with: path, file_size, laplacian, is_sharp.
@@ -509,17 +510,22 @@ def score_frames(frame_paths, video_info, cfg):
     logger.info("Sharpness threshold: %d bytes (fixed=%d, adaptive=%d, median=%d)",
                 filesize_threshold, fixed_threshold, adaptive_threshold, median_size)
 
-    has_cv2 = bool(scores)
-    if scores:
-        first_lap = _laplacian_variance(scores[0]["path"])
+    for s in scores:
+        s["is_sharp"] = s["file_size"] >= filesize_threshold
+
+    # Second pass: Laplacian variance on frames that passed file size check
+    has_cv2 = True
+    sharp_scores = [s for s in scores if s["is_sharp"]]
+    if sharp_scores:
+        first_lap = _laplacian_variance(sharp_scores[0]["path"])
         if first_lap is None:
             has_cv2 = False
             logger.warning("OpenCV not available, using file-size-only scoring")
 
-    if has_cv2 and scores:
-        logger.info("Computing Laplacian variance for %d frames...", len(scores))
+    if has_cv2 and sharp_scores:
+        logger.info("Computing Laplacian variance for %d candidate frames...", len(sharp_scores))
         laplacian_values = []
-        for s in scores:
+        for s in sharp_scores:
             s["laplacian"] = _laplacian_variance(s["path"])
             laplacian_values.append(s["laplacian"])
 
@@ -528,11 +534,9 @@ def score_frames(frame_paths, video_info, cfg):
         lap_threshold = median_lap * qcfg["laplacian_ratio_threshold"]
         logger.info("Laplacian threshold: %.1f (median=%.1f)", lap_threshold, median_lap)
 
-        for s in scores:
-            s["is_sharp"] = s["laplacian"] >= lap_threshold
-    else:
-        for s in scores:
-            s["is_sharp"] = s["file_size"] >= filesize_threshold
+        for s in sharp_scores:
+            if s["laplacian"] < lap_threshold:
+                s["is_sharp"] = False
 
     total_sharp = sum(1 for s in scores if s["is_sharp"])
     pass_rate = total_sharp / len(scores) if scores else 0
@@ -1239,11 +1243,15 @@ def process_video(video_path, output_dir=None, project_root=None,
         final_path = os.path.join(output_dir, "panorama.jpg")
         equirect_size = None
 
-        # Only embed in full 2:1 canvas if panorama covers >270° horizontally.
-        # For partial panoramas, the output is already equirectangular projection —
-        # just provide FOV metadata and let Pannellum handle partial view.
+        # Only embed in a full 2:1 canvas when the pano is effectively complete.
+        # Otherwise we would create a fake 360 image with a visible black gap where
+        # the sweep did not actually close the loop.
         haov_deg = (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi if proj_range else 0
-        do_full_equirect = equirectangular and proj_range and haov_deg > 270
+        do_full_equirect = (
+            equirectangular
+            and proj_range
+            and haov_deg >= FULL_EQUIRECT_MIN_HAOV_DEG
+        )
 
         if do_full_equirect:
             # Embed partial panorama in full 2:1 equirectangular canvas
@@ -1263,6 +1271,10 @@ def process_video(video_path, output_dir=None, project_root=None,
         # Collect warnings
         warnings = []
         frames_used = stitch_result.get("frames_used", len(selected_paths))
+        if equirectangular and proj_range and not do_full_equirect:
+            warnings.append(
+                f"Panorama covers {haov_deg:.1f}° horizontally; keeping partial output to avoid a black gap in full 360 export"
+            )
         if stitcher_backend == "hugin":
             frames_projected = stitch_result.get("frames_projected", len(selected_paths))
             if frames_used < frames_projected:
@@ -1296,6 +1308,7 @@ def process_video(video_path, output_dir=None, project_root=None,
             "backend": stitcher_backend,
             "mode": stitch_mode,
             "projection": "equirectangular",
+            "coverage_deg": round(haov_deg, 1) if haov_deg else None,
         }
         if stitcher_backend == "hugin":
             stitch_info["frames_projected"] = stitch_result.get("frames_projected")
@@ -1314,17 +1327,24 @@ def process_video(video_path, output_dir=None, project_root=None,
                 pannellum["haov"] = fov["haov"]
                 pannellum["vaov"] = fov["vaov"]
                 pannellum["vOffset"] = fov["center_pitch"]
-                # Set explicit pitch/yaw limits instead of avoidShowingBackground
-                # which breaks on touch interaction
+                # Constrain view strictly within the available frame area.
+                # Pad inward so the viewport never reveals edges/black borders.
+                # The padding must account for the current hfov — at max zoom out
+                # the viewport itself spans hfov degrees, so we shrink bounds by
+                # half the max visible hfov to keep edges hidden.
+                view_hfov = min(fov["haov"] * 0.8, 100)  # typical max viewing hfov
+                view_vfov = view_hfov * 0.5  # approximate vertical fov at that hfov
+                pitch_pad = max(view_vfov / 2, 5)
                 half_vaov = fov["vaov"] / 2
-                pannellum["minPitch"] = -half_vaov
-                pannellum["maxPitch"] = half_vaov
+                pannellum["minPitch"] = -(half_vaov - pitch_pad)
+                pannellum["maxPitch"] = half_vaov - pitch_pad
                 if fov["haov"] < 360:
+                    yaw_pad = max(view_hfov / 2, 10)
                     half_haov = fov["haov"] / 2
-                    pannellum["minYaw"] = -half_haov
-                    pannellum["maxYaw"] = half_haov
-                    pannellum["minHfov"] = min(50, fov["haov"])
-                    pannellum["maxHfov"] = fov["haov"]
+                    pannellum["minYaw"] = -(half_haov - yaw_pad)
+                    pannellum["maxYaw"] = half_haov - yaw_pad
+                    pannellum["minHfov"] = min(50, fov["haov"] * 0.6)
+                    pannellum["maxHfov"] = fov["haov"] * 0.85
         stitch_info["pannellum"] = pannellum
 
         result = {

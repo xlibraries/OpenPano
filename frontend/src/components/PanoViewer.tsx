@@ -44,17 +44,20 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   const stitch = result.stitch;
   const warnings = result.warnings || [];
 
-  // Zoom limits: keep it feeling panoramic
-  // minHfov prevents zooming in too tight, maxHfov shows the full pano width
-  const minHfov = fov ? Math.max(60, fov.haov * 0.4) : 60;
-  const maxHfov = fov ? Math.min(fov.haov, 120) : 120;
-  const initialHfov = fov ? Math.min(100, fov.haov * 0.8) : 100;
+  // Use backend-provided FOV limits from Pannellum config, with sensible fallbacks.
+  // These are set tight enough that the user never sees panorama edges.
+  const pCfg = stitch?.pannellum;
+  const minHfov = (pCfg?.minHfov as number) ?? (fov ? Math.max(50, fov.haov * 0.4) : 50);
+  const maxHfov = (pCfg?.maxHfov as number) ?? (fov ? Math.min(fov.haov * 0.85, 120) : 120);
+  const initialHfov = Math.min(maxHfov, fov ? fov.haov * 0.7 : 100);
 
   useEffect(() => {
     if (!containerRef.current || !stitch?.pannellum) return;
 
     const panoConfig = { ...stitch.pannellum };
     delete panoConfig.avoidShowingBackground;
+    const isPartialPano =
+      typeof panoConfig.haov === "number" && panoConfig.haov < 360;
 
     const config: Record<string, unknown> = {
       ...panoConfig,
@@ -72,8 +75,13 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
     };
 
     if (fov) {
-      if (fov.center_yaw !== undefined) config.yaw = fov.center_yaw;
-      if (fov.center_pitch !== undefined) config.pitch = fov.center_pitch;
+      if (isPartialPano) {
+        config.yaw = 0;
+        config.pitch = 0;
+      } else {
+        if (fov.center_yaw !== undefined) config.yaw = fov.center_yaw;
+        if (fov.center_pitch !== undefined) config.pitch = fov.center_pitch;
+      }
     }
 
     setHfov(initialHfov);
@@ -104,11 +112,18 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   const handleResetView = useCallback(() => {
     const v = viewerRef.current;
     if (!v) return;
+    const isPartialPano =
+      typeof stitch?.pannellum?.haov === "number" && stitch.pannellum.haov < 360;
     v.setHfov(initialHfov);
-    v.setYaw(fov?.center_yaw ?? 0);
-    v.setPitch(fov?.center_pitch ?? 0);
+    if (isPartialPano) {
+      v.setYaw(0);
+      v.setPitch(0);
+    } else {
+      v.setYaw(fov?.center_yaw ?? 0);
+      v.setPitch(fov?.center_pitch ?? 0);
+    }
     setHfov(initialHfov);
-  }, [initialHfov, fov]);
+  }, [initialHfov, fov, stitch]);
 
   const handleDownload = useCallback(() => {
     const panoUrl = result.stitch?.pannellum?.panorama;
