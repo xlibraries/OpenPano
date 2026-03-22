@@ -325,6 +325,7 @@ def _refine_placement_with_matches(shot1_data, shot2_data, matches, kp1, kp2, mi
             index=idx,
             fwd=fwd, right=right, up=up,
             tan_h=tan_h, tan_v=tan_v,
+                        fov_h=fov_h, fov_v=fov_v,
             img_arr=img_arr, img_w=img_w, img_h=img_h,
             mean_brightness=mean_brightness,
         ))
@@ -336,10 +337,99 @@ def _refine_placement_with_matches(shot1_data, shot2_data, matches, kp1, kp2, mi
     logger.info("Loaded %d / %d shots  (global brightness=%.1f)",
                 len(shot_data), len(shots), global_mean)
 
+                    # ------------------------------------------------------------------
+    # Hybrid feature-matching refinement (optional)
+    # For each pair of adjacent shots, detect ORB features in their overlap
+    # regions and compute a homography-based yaw/pitch correction. This
+    # compensates for small IMU drift while keeping the metadata-first design.
+    # ------------------------------------------------------------------
+    logger.info("Applying hybrid feature refinement to %d shots...", len(shot_data))
+    
+    # Build a simple adjacency list (shots that overlap based on angular distance)
+    for i, sd1 in enumerate(shot_data):
+        for j, sd2 in enumerate(shot_data):
+            if i >= j:
+                continue
+            
+            # Check if shots are likely to overlap (angle between < FOV)
+            angle_between = np.arccos(np.clip(np.dot(sd1["fwd"], sd2["fwd"]), -1.0, 1.0))
+            if angle_between > fov_h:
+                continue
+            
+            # Compute overlap masks
+            mask1, mask2 = _compute_overlap_mask(
+                sd1["fwd"], sd2["fwd"], fov_h,
+                sd1["img_w"], sd1["img_h"],
+                (sd1["fwd"], sd1["right"], sd1["up"]),
+                (sd2["fwd"], sd2["right"], sd2["up"]),
+                sd1["tan_h"], sd1["tan_v"]
+            )
+            
+            if mask1 is None or mask2 is None:
+                continue
+            
+            # Convert to grayscale for feature detection
+            gray1 = cv2.cvtColor(sd1["img_arr"].astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            gray2 = cv2.cvtColor(sd2["img_arr"].astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            
+            # Detect ORB features in overlap regions
+            kp1, desc1 = _detect_orb_features(gray1, mask=mask1)
+            kp2, desc2 = _detect_orb_features(gray2, mask=mask2)
+            
+            # Match features
+            matches = _match_features(desc1, desc2)
+            
+            if len(matches) < 20:
+                continue
+            
+            # Compute refinement offset for shot 2
+            offset_yaw, offset_pitch = _refine_placement_with_matches(
+                sd1, sd2, matches, kp1, kp2, min_matches=20
+            )
+            
+            if abs(offset_yaw) < 0.1 and abs(offset_pitch) < 0.1:
+                continue
+            
+            # Apply rotation offset to sd2's forward vector
+            # Convert yaw/pitch offsets to rotation matrix
+            yaw_rad = np.radians(offset_yaw)
+            pitch_rad = np.radians(offset_pitch)
+            
+            # Yaw rotation (around up axis)
+            cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
+            R_yaw = np.array([
+                [cos_y, 0, sin_y],
+                [0, 1, 0],
+                [-sin_y, 0, cos_y]
+            ])
+            
+            # Pitch rotation (around right axis)
+            cos_p, sin_p = np.cos(pitch_rad), np.sin(pitch_rad)
+            R_pitch = np.array([
+                [1, 0, 0],
+                [0, cos_p, -sin_p],
+                [0, sin_p, cos_p]
+            ])
+            
+            # Apply rotation to forward vector
+            fwd_refined = R_pitch @ R_yaw @ sd2["fwd"]
+            fwd_refined /= np.linalg.norm(fwd_refined)
+            
+            # Recompute camera basis with refined forward
+            fwd, right, up = _camera_basis(fwd_refined)
+            sd2["fwd"] = fwd
+            sd2["right"] = right
+            sd2["up"] = up
+            
+            logger.info("Refined shot %d vs %d: yaw=%.2f°, pitch=%.2f°",
+                       sd1["index"], sd2["index"], offset_yaw, offset_pitch)
+
     # ------------------------------------------------------------------
     # Per-shot exposure normalisation.
     # Sample a 32×32 pixel patch at the centre of each shot's image and
     # compute the mean luminance.  Derive a per-shot gain so all centre
+
+
     # patches match the global mean.  Centre pixels are deepest inside the
     # FOV, so they're free of edge vignetting and reliably represent the
     # shot's exposure level.
