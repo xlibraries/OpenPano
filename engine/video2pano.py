@@ -1290,8 +1290,15 @@ def process_video(video_path, output_dir=None, project_root=None,
                 pannellum["haov"] = fov["haov"]
                 pannellum["vaov"] = fov["vaov"]
                 pannellum["vOffset"] = fov["center_pitch"]
-                pannellum["avoidShowingBackground"] = True
+                # Set explicit pitch/yaw limits instead of avoidShowingBackground
+                # which breaks on touch interaction
+                half_vaov = fov["vaov"] / 2
+                pannellum["minPitch"] = -half_vaov
+                pannellum["maxPitch"] = half_vaov
                 if fov["haov"] < 360:
+                    half_haov = fov["haov"] / 2
+                    pannellum["minYaw"] = -half_haov
+                    pannellum["maxYaw"] = half_haov
                     pannellum["minHfov"] = min(50, fov["haov"])
                     pannellum["maxHfov"] = fov["haov"]
         stitch_info["pannellum"] = pannellum

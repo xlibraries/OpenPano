@@ -50,8 +50,11 @@ export default function PanoViewer({ result, onReset }: PanoViewerProps) {
   useEffect(() => {
     if (!containerRef.current || !stitch?.pannellum) return;
 
+    const panoConfig = { ...stitch.pannellum };
+    delete panoConfig.avoidShowingBackground;
+
     const config: Record<string, unknown> = {
-      ...stitch.pannellum,
+      ...panoConfig,
       autoLoad: true,
       showControls: true,
       mouseZoom: true,
