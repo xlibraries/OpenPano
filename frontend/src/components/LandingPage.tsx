@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { PipelineResult } from "../types";
 
 const DEMOS = [
   { id: "360-3", file: "/demos/360-3.mp4", label: "Quick Pan", desc: "Short sweep panorama" },
@@ -6,12 +7,19 @@ const DEMOS = [
   { id: "360vid", file: "/demos/360vid.mp4", label: "Full 360\u00B0", desc: "Complete rotation" },
 ];
 
+interface PastJob {
+  job_id: string;
+  panorama: string;
+  created_at: number;
+}
+
 interface LandingPageProps {
   onJobStarted: (jobId: string) => void;
   onCameraCapture?: () => void;
+  onViewResult?: (result: PipelineResult) => void;
 }
 
-export default function LandingPage({ onJobStarted, onCameraCapture }: LandingPageProps) {
+export default function LandingPage({ onJobStarted, onCameraCapture, onViewResult }: LandingPageProps) {
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -22,7 +30,15 @@ export default function LandingPage({ onJobStarted, onCameraCapture }: LandingPa
   const [equirectWidth, setEquirectWidth] = useState("4096");
   const [maxFrames, setMaxFrames] = useState("80");
   const [focalLength, setFocalLength] = useState("");
+  const [pastJobs, setPastJobs] = useState<PastJob[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    fetch("/api/past-jobs")
+      .then((r) => r.json())
+      .then((data: PastJob[]) => setPastJobs(data))
+      .catch(() => {});
+  }, []);
 
   const upload = useCallback(
     (file: File) => {
@@ -504,6 +520,48 @@ export default function LandingPage({ onJobStarted, onCameraCapture }: LandingPa
           </div>
         </div>
       </div>
+
+      {/* Previous panoramas */}
+      {pastJobs.length > 0 && (
+        <div className="max-w-5xl mx-auto px-6 py-12">
+          <h2 className="text-xl font-semibold mb-6">Previous Panoramas</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+            {pastJobs.map((job) => (
+              <button
+                key={job.job_id}
+                onClick={() => {
+                  if (!onViewResult) return;
+                  onViewResult({
+                    status: "success",
+                    stitch: {
+                      final_size: [4096, 2048],
+                      stitched_size: [4096, 2048],
+                      duration_seconds: 0,
+                      mode: "metadata",
+                      projection: "equirectangular",
+                      pannellum: {
+                        type: "equirectangular",
+                        panorama: job.panorama,
+                        autoLoad: true,
+                      },
+                    },
+                  });
+                }}
+                className="group relative aspect-video rounded-xl overflow-hidden border border-border hover:border-primary/50 transition-all"
+              >
+                <img
+                  src={job.panorama}
+                  alt="Panorama"
+                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                />
+                <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <span className="text-white text-sm font-medium">View 360°</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Footer spacer */}
       <div className="flex-1" />

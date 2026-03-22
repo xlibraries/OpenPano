@@ -75,6 +75,25 @@ def cleanup_old_jobs(max_age_seconds=7200):
                 pass
 
 
+def _exec_engine(cmd, job, q):
+    """Run engine command, stream progress, return (returncode, stdout_str)."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    for line in proc.stderr:
+        line = line.strip()
+        if not line:
+            continue
+        for keyword, label, pct in STAGE_MAP:
+            if keyword in line:
+                progress = {"stage": label, "percent": pct, "detail": line}
+                job["progress"] = progress
+                q.put({"event": "progress", "data": progress})
+                break
+    proc.wait()
+    return proc.returncode, proc.stdout.read()
+
+
 def run_pipeline(job_id):
     """Background thread: run video2pano.py and stream progress via queue."""
     job = jobs[job_id]
@@ -83,49 +102,43 @@ def run_pipeline(job_id):
     input_path = job["input_path"]
     stitch_backend = job["stitch_backend"]
 
-    cmd = [
-        ENGINE_PYTHON, ENGINE_SCRIPT,
-        input_path,
-        "-o", output_dir,
-        "-v",
-        "--stitcher-backend", stitch_backend,
-    ]
-    if job.get("input_mode") == "images":
-        cmd.extend(["--input-mode", "images"])
-    if ENGINE_ROOT:
-        cmd.extend(["--project-root", ENGINE_ROOT])
-    if job.get("equirectangular"):
-        cmd.append("--equirectangular")
-        eq_width = job.get("equirect_width")
-        if eq_width:
-            cmd.extend(["--equirect-width", str(eq_width)])
-    if job.get("max_frames"):
-        cmd.extend(["--max-frames", str(job["max_frames"])])
-    if job.get("focal_length"):
-        cmd.extend(["--focal-length", str(job["focal_length"])])
+    def build_cmd(backend):
+        cmd = [
+            ENGINE_PYTHON, ENGINE_SCRIPT,
+            input_path,
+            "-o", output_dir,
+            "-v",
+            "--stitcher-backend", backend,
+        ]
+        if job.get("input_mode") == "images":
+            cmd.extend(["--input-mode", "images"])
+        if ENGINE_ROOT:
+            cmd.extend(["--project-root", ENGINE_ROOT])
+        if job.get("equirectangular"):
+            cmd.append("--equirectangular")
+            eq_width = job.get("equirect_width")
+            if eq_width:
+                cmd.extend(["--equirect-width", str(eq_width)])
+        if job.get("max_frames"):
+            cmd.extend(["--max-frames", str(job["max_frames"])])
+        if job.get("focal_length"):
+            cmd.extend(["--focal-length", str(job["focal_length"])])
+        return cmd
 
     try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        returncode, stdout = _exec_engine(build_cmd(stitch_backend), job, q)
 
-        for line in proc.stderr:
-            line = line.strip()
-            if not line:
-                continue
-            for keyword, label, pct in STAGE_MAP:
-                if keyword in line:
-                    progress = {
-                        "stage": label, "percent": pct, "detail": line,
-                    }
-                    job["progress"] = progress
-                    q.put({"event": "progress", "data": progress})
-                    break
+        # Auto-fallback: if Hugin fails, retry with OpenPano
+        if returncode != 0 and stitch_backend == "hugin":
+            q.put({"event": "progress", "data": {
+                "stage": "Hugin failed — retrying with OpenPano…",
+                "percent": 20,
+                "detail": "",
+            }})
+            job["progress"] = {"stage": "Hugin failed — retrying with OpenPano…", "percent": 20, "detail": ""}
+            returncode, stdout = _exec_engine(build_cmd("openpano"), job, q)
 
-        proc.wait()
-        stdout = proc.stdout.read()
-
-        if proc.returncode == 0 and stdout.strip():
+        if returncode == 0 and stdout.strip():
             result = json.loads(stdout)
             result["stitch"]["pannellum"]["panorama"] = (
                 f"/api/jobs/{job_id}/panorama"
@@ -140,7 +153,7 @@ def run_pipeline(job_id):
                 result = {}
             error_msg = result.get(
                 "error_message",
-                f"Pipeline failed (exit code {proc.returncode})",
+                f"Pipeline failed (exit code {returncode})",
             )
             result.setdefault("status", "error")
             result.setdefault("error_message", error_msg)
@@ -369,12 +382,32 @@ def job_status(job_id):
 
 @app.route("/api/jobs/<job_id>/panorama")
 def serve_panorama(job_id):
-    if job_id not in jobs:
-        return jsonify({"error": "Job not found"}), 404
-    pano_path = os.path.join(jobs[job_id]["output_dir"], "panorama.jpg")
+    # Check in-memory registry first, then fall back to disk
+    if job_id in jobs:
+        pano_path = os.path.join(jobs[job_id]["output_dir"], "panorama.jpg")
+    else:
+        pano_path = os.path.join(JOBS_DIR, job_id, "panorama.jpg")
     if not os.path.isfile(pano_path):
         return jsonify({"error": "Panorama not ready"}), 404
     return send_file(pano_path, mimetype="image/jpeg")
+
+
+@app.route("/api/past-jobs")
+def list_past_jobs():
+    """Return list of completed jobs (panorama.jpg exists on disk), newest first."""
+    if not os.path.isdir(JOBS_DIR):
+        return jsonify([])
+    result = []
+    for name in os.listdir(JOBS_DIR):
+        pano = os.path.join(JOBS_DIR, name, "panorama.jpg")
+        if os.path.isfile(pano):
+            result.append({
+                "job_id": name,
+                "panorama": f"/api/jobs/{name}/panorama",
+                "created_at": int(os.path.getmtime(pano)),
+            })
+    result.sort(key=lambda x: x["created_at"], reverse=True)
+    return jsonify(result)
 
 
 if __name__ == "__main__":

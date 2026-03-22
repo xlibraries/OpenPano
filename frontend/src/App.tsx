@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import LandingPage from "./components/LandingPage";
 import ProcessingView from "./components/ProcessingView";
 import PanoViewer from "./components/PanoViewer";
-import CameraCapture from "./components/CameraCapture";
+import CameraCapture, { hasPendingPhotos } from "./components/CameraCapture";
 import type { PipelineResult } from "./types";
 
 type View = "landing" | "camera" | "processing" | "viewer" | "error";
@@ -23,7 +23,18 @@ export default function App() {
     setView("viewer");
   }, []);
 
+  const handleViewResult = useCallback((data: PipelineResult) => {
+    setResult(data);
+    setView("viewer");
+  }, []);
+
   const handleError = useCallback((msg: string) => {
+    // If photos are cached from a camera capture, go back to the review screen
+    // instead of the dead-end error screen so the user can retry without recapturing
+    if (hasPendingPhotos()) {
+      setView("camera");
+      return;
+    }
     setErrorMsg(msg);
     setView("error");
   }, []);
@@ -54,6 +65,7 @@ export default function App() {
           <LandingPage
             onJobStarted={handleJobStarted}
             onCameraCapture={() => setView("camera")}
+            onViewResult={handleViewResult}
           />
         )}
 

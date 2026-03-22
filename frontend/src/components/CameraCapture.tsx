@@ -55,7 +55,12 @@ interface PhotoPose {
 interface CameraCaptureProps {
   onJobStarted: (jobId: string) => void;
   onCancel: () => void;
+  savedPhotos?: Photo[];
 }
+
+// Module-level cache — survives component unmount so photos aren't lost on pipeline failure
+let _pendingPhotos: Photo[] | null = null;
+export const hasPendingPhotos = () => _pendingPhotos !== null;
 
 interface SensorRequestResult {
   denied: boolean;
@@ -321,10 +326,14 @@ function getSensorPermissionApiSupport() {
 }
 
 export default function CameraCapture({ onJobStarted, onCancel }: CameraCaptureProps) {
-  const [step, setStep] = useState<Step>("mode-select");
-  const [mode, setMode] = useState<CaptureMode>("video");
+  // Restore from cache if we're coming back after a pipeline failure
+  const restored = _pendingPhotos;
+  _pendingPhotos = null;
+
+  const [step, setStep] = useState<Step>(restored ? "review" : "mode-select");
+  const [mode, setMode] = useState<CaptureMode>("photo");
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [photos, setPhotos] = useState<Photo[]>([]);
+  const [photos, setPhotos] = useState<Photo[]>(restored ?? []);
   const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -816,6 +825,8 @@ export default function CameraCapture({ onJobStarted, onCancel }: CameraCaptureP
       xhr.onload = () => {
         setUploading(false);
         if (xhr.status === 200) {
+          // Cache photos so they can be restored if the pipeline fails
+          if (mode === "photo") _pendingPhotos = photos;
           onJobStarted(JSON.parse(xhr.responseText).job_id);
           return;
         }

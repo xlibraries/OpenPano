@@ -1500,7 +1500,31 @@ def process_image_sequence(images_dir, output_dir=None, project_root=None,
         stitch_mode = None
         vw, vh = source_info["width"], source_info["height"]
 
-        if stitcher_backend == "hugin":
+        # --- Metadata-based stitcher (PanoCraft photo-sphere captures) ---
+        # When capture_metadata.json exists we skip feature matching entirely
+        # and use the IMU-tracked 3D vectors to project each photo directly.
+        metadata_path = os.path.join(output_dir, "capture_metadata.json")
+        if os.path.isfile(metadata_path):
+            logger.info("capture_metadata.json found — using metadata stitcher")
+            try:
+                from stitch_metadata import stitch_from_metadata
+            except ImportError:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent))
+                from stitch_metadata import stitch_from_metadata
+
+            meta_out = os.path.join(output_dir, "panorama_meta.jpg")
+            stitch_result = stitch_from_metadata(
+                metadata_path, images_dir, meta_out,
+                width=equirect_width if equirect_width else 4096,
+                default_fov_deg=65.0,
+            )
+            stitch_mode = "metadata"
+            # Already equirectangular — skip the format_equirectangular step
+            final_path = os.path.join(output_dir, "panorama.jpg")
+            shutil.move(meta_out, final_path)
+            stitch_result["output_path"] = final_path
+        elif stitcher_backend == "hugin":
             stitch_result = run_hugin_stitcher(
                 selected_paths,
                 output_dir,
@@ -1555,28 +1579,33 @@ def process_image_sequence(images_dir, output_dir=None, project_root=None,
                     (proj_range["max_lat"] - proj_range["min_lat"]) * 180 / math.pi)
         fov = compute_fov(proj_range)
 
-        final_path = os.path.join(output_dir, "panorama.jpg")
         equirect_size = None
 
-        haov_deg = (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi if proj_range else 0
-        do_full_equirect = (
-            equirectangular
-            and proj_range
-            and haov_deg >= FULL_EQUIRECT_MIN_HAOV_DEG
-        )
+        if stitch_mode == "metadata":
+            # Already written to panorama.jpg by the metadata stitcher
+            final_path = stitch_result["output_path"]
+            equirect_size = stitch_result.get("final_size")
+        else:
+            final_path = os.path.join(output_dir, "panorama.jpg")
+            haov_deg = (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi if proj_range else 0
+            do_full_equirect = (
+                equirectangular
+                and proj_range
+                and haov_deg >= FULL_EQUIRECT_MIN_HAOV_DEG
+            )
 
-        if do_full_equirect:
-            equirect_path = os.path.join(output_dir, "panorama_equirect.jpg")
-            equirect_size = format_equirectangular(
-                stitch_result["output_path"], equirect_path, proj_range, equirect_width)
-            if equirect_size:
-                shutil.move(equirect_path, final_path)
-                shutil.move(stitch_result["output_path"],
-                            os.path.join(output_dir, "panorama_cropped.jpg"))
+            if do_full_equirect:
+                equirect_path = os.path.join(output_dir, "panorama_equirect.jpg")
+                equirect_size = format_equirectangular(
+                    stitch_result["output_path"], equirect_path, proj_range, equirect_width)
+                if equirect_size:
+                    shutil.move(equirect_path, final_path)
+                    shutil.move(stitch_result["output_path"],
+                                os.path.join(output_dir, "panorama_cropped.jpg"))
+                else:
+                    shutil.move(stitch_result["output_path"], final_path)
             else:
                 shutil.move(stitch_result["output_path"], final_path)
-        else:
-            shutil.move(stitch_result["output_path"], final_path)
 
         warnings = []
         frames_used = stitch_result.get("frames_used", len(selected_paths))
