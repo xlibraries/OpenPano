@@ -8,9 +8,10 @@ const DEMOS = [
 
 interface LandingPageProps {
   onJobStarted: (jobId: string) => void;
+  onCameraCapture?: () => void;
 }
 
-export default function LandingPage({ onJobStarted }: LandingPageProps) {
+export default function LandingPage({ onJobStarted, onCameraCapture }: LandingPageProps) {
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
@@ -176,7 +177,32 @@ export default function LandingPage({ onJobStarted }: LandingPageProps) {
       {/* Divider */}
       <div className="flex items-center gap-4 max-w-xl mx-auto w-full px-4 my-4">
         <div className="flex-1 h-px bg-border" />
-        <span className="text-detail text-sm">or upload your own</span>
+        <span className="text-detail text-sm">or capture your own</span>
+        <div className="flex-1 h-px bg-border" />
+      </div>
+
+      {/* Camera capture CTA */}
+      {onCameraCapture && (
+        <div className="max-w-xl mx-auto w-full px-4 mb-4">
+          <button
+            onClick={onCameraCapture}
+            disabled={uploading}
+            className="w-full flex items-center justify-center gap-3 py-4 bg-surface border border-border hover:border-primary/50 rounded-xl transition-all disabled:opacity-40 group"
+          >
+            <span className="text-2xl">📷</span>
+            <div className="text-left">
+              <p className="text-sm font-semibold group-hover:text-primary transition-colors">Capture with Camera</p>
+              <p className="text-xs text-detail">Guided 360° capture — video pan or photo burst</p>
+            </div>
+            <span className="ml-auto text-detail text-xs bg-background border border-border px-2 py-0.5 rounded-full">New</span>
+          </button>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="flex items-center gap-4 max-w-xl mx-auto w-full px-4 mb-4">
+        <div className="flex-1 h-px bg-border" />
+        <span className="text-detail text-sm">or upload a file</span>
         <div className="flex-1 h-px bg-border" />
       </div>
 

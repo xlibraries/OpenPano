@@ -2,9 +2,10 @@ import { useCallback, useState } from "react";
 import LandingPage from "./components/LandingPage";
 import ProcessingView from "./components/ProcessingView";
 import PanoViewer from "./components/PanoViewer";
+import CameraCapture from "./components/CameraCapture";
 import type { PipelineResult } from "./types";
 
-type View = "landing" | "processing" | "viewer" | "error";
+type View = "landing" | "camera" | "processing" | "viewer" | "error";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
@@ -50,7 +51,17 @@ export default function App() {
 
       <main>
         {view === "landing" && (
-          <LandingPage onJobStarted={handleJobStarted} />
+          <LandingPage
+            onJobStarted={handleJobStarted}
+            onCameraCapture={() => setView("camera")}
+          />
+        )}
+
+        {view === "camera" && (
+          <CameraCapture
+            onJobStarted={handleJobStarted}
+            onCancel={() => setView("landing")}
+          />
         )}
 
         {view === "processing" && (
