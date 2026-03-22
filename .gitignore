@@ -22,3 +22,4 @@ frontend/.env.local
 # Legacy
 example-data/
 example-data.tgz
+frontend/tsconfig.tsbuildinfo

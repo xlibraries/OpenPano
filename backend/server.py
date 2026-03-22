@@ -26,6 +26,7 @@ JOBS_DIR = os.environ.get(
 DEFAULT_STITCH_BACKEND = os.environ.get("ENGINE_DEFAULT_STITCH_BACKEND", "openpano")
 VALID_STITCH_BACKENDS = {"openpano", "hugin"}
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
@@ -35,6 +36,7 @@ jobs = {}  # job_id -> {status, progress_queue, progress, result, output_dir, vi
 # Stage mapping: (stderr keyword, UI label, percent)
 STAGE_MAP = [
     ("Video:", "Probing video", 5),
+    ("Image set:", "Loading still images", 8),
     ("Extracting frames", "Extracting frames", 15),
     ("Extracted", "Frames extracted", 25),
     ("Sharpness", "Scoring quality", 35),
@@ -78,16 +80,18 @@ def run_pipeline(job_id):
     job = jobs[job_id]
     q = job["progress_queue"]
     output_dir = job["output_dir"]
-    video_path = job["video_path"]
+    input_path = job["input_path"]
     stitch_backend = job["stitch_backend"]
 
     cmd = [
         ENGINE_PYTHON, ENGINE_SCRIPT,
-        video_path,
+        input_path,
         "-o", output_dir,
         "-v",
         "--stitcher-backend", stitch_backend,
     ]
+    if job.get("input_mode") == "images":
+        cmd.extend(["--input-mode", "images"])
     if ENGINE_ROOT:
         cmd.extend(["--project-root", ENGINE_ROOT])
     if job.get("equirectangular"):
@@ -222,12 +226,105 @@ def upload():
         "progress": {"stage": "Starting pipeline...", "percent": 0, "detail": ""},
         "result": None,
         "output_dir": job_dir,
+        "input_mode": "video",
+        "input_path": video_path,
         "video_path": video_path,
         "stitch_backend": stitch_backend,
         "equirectangular": equirectangular,
         "equirect_width": equirect_width,
         "max_frames": max_frames,
         "focal_length": focal_length,
+    }
+
+    thread = threading.Thread(target=run_pipeline, args=(job_id,), daemon=True)
+    thread.start()
+
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/upload-photosphere", methods=["POST"])
+def upload_photosphere():
+    cleanup_old_jobs()
+
+    photos = request.files.getlist("photos")
+    if not photos:
+        return jsonify({"error": "No still photos provided"}), 400
+
+    stitch_backend = request.form.get("stitch_backend", "hugin").strip().lower()
+    if stitch_backend not in VALID_STITCH_BACKENDS:
+        return jsonify({
+            "error": f"Invalid stitch backend '{stitch_backend}'. Valid options: {', '.join(sorted(VALID_STITCH_BACKENDS))}"
+        }), 400
+
+    equirectangular = request.form.get("equirectangular", "1").strip() in ("1", "true", "yes")
+
+    equirect_width = None
+    raw_eq_width = request.form.get("equirect_width", "").strip()
+    if raw_eq_width:
+        try:
+            equirect_width = int(raw_eq_width)
+            if equirect_width not in (2048, 4096, 8192):
+                equirect_width = 4096
+        except ValueError:
+            equirect_width = 4096
+
+    max_frames = None
+    raw_max_frames = request.form.get("max_frames", "").strip()
+    if raw_max_frames:
+        try:
+            max_frames = int(raw_max_frames)
+            if not (1 <= max_frames <= 500):
+                max_frames = None
+        except ValueError:
+            max_frames = None
+
+    focal_length = None
+    raw_focal = request.form.get("focal_length", "").strip()
+    if raw_focal:
+        try:
+            focal_length = float(raw_focal)
+            if not (5.0 <= focal_length <= 200.0):
+                focal_length = None
+        except ValueError:
+            focal_length = None
+
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    stills_dir = os.path.join(job_dir, "stills")
+    os.makedirs(stills_dir, exist_ok=True)
+
+    for idx, photo in enumerate(photos, start=1):
+        filename = photo.filename or f"photo_{idx}.jpg"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext not in ALLOWED_IMAGE_EXTENSIONS:
+            return jsonify({
+                "error": f"Invalid image type '.{ext}'. Accepted: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}"
+            }), 400
+        out_path = os.path.join(stills_dir, f"shot_{idx:03d}.{ext}")
+        photo.save(out_path)
+
+    capture_metadata = request.form.get("capture_metadata", "").strip()
+    metadata_path = None
+    if capture_metadata:
+        metadata_path = os.path.join(job_dir, "capture_metadata.json")
+        with open(metadata_path, "w", encoding="utf-8") as fh:
+            fh.write(capture_metadata)
+
+    jobs[job_id] = {
+        "status": "processing",
+        "progress_queue": queue.Queue(),
+        "progress": {"stage": "Starting pipeline...", "percent": 0, "detail": ""},
+        "result": None,
+        "output_dir": job_dir,
+        "input_mode": "images",
+        "input_path": stills_dir,
+        "stitch_backend": stitch_backend,
+        "equirectangular": equirectangular,
+        "equirect_width": equirect_width,
+        "max_frames": max_frames,
+        "focal_length": focal_length,
+        "capture_metadata_path": metadata_path,
     }
 
     thread = threading.Thread(target=run_pipeline, args=(job_id,), daemon=True)

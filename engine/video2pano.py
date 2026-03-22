@@ -40,6 +40,7 @@ HUGIN_REQUIRED_TOOLS = (
     "enblend",
 )
 FULL_EQUIRECT_MIN_HAOV_DEG = 350.0
+IMAGE_INPUT_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 DEFAULT_HUGIN_ENV_PATHS = (
     os.path.expanduser("~/micromamba/envs/hugin-cli/bin"),
     os.path.expanduser("~/mambaforge/envs/hugin-cli/bin"),
@@ -455,6 +456,86 @@ def extract_frames(video_path, output_dir, video_fps=30.0, jpeg_quality=2):
 
     logger.info("Extracted %d frames", len(frames))
     return [str(f) for f in frames]
+
+
+def collect_image_frames(images_dir):
+    """Load a sorted list of still images from a directory."""
+    path = Path(images_dir)
+    if not path.is_dir():
+        raise InputError(f"Image directory not found: {images_dir}", "INPUT_NOT_FOUND")
+
+    frames = sorted(
+        str(p.resolve())
+        for p in path.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_INPUT_EXTENSIONS
+    )
+    if len(frames) < 2:
+        raise InputError(
+            f"Need at least 2 still images to stitch; found {len(frames)} in {images_dir}",
+            "INPUT_NOT_FOUND",
+        )
+
+    logger.info("Image set: loaded %d still images from %s", len(frames), path.resolve())
+    return frames
+
+
+def _probe_image_dimensions(image_path):
+    """Read width and height of a still image using ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise InputError("ffprobe not found in PATH. Install ffmpeg.", "FFMPEG_MISSING")
+
+    cmd = [
+        ffprobe,
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        image_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise InputError(f"ffprobe failed on image: {image_path}", "INVALID_IMAGE")
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise InputError("ffprobe returned invalid JSON for image input", "INVALID_IMAGE") from exc
+
+    video_stream = None
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video":
+            video_stream = stream
+            break
+    if not video_stream:
+        raise InputError(f"Could not read image dimensions: {image_path}", "INVALID_IMAGE")
+
+    return int(video_stream["width"]), int(video_stream["height"])
+
+
+def probe_image_sequence(frame_paths):
+    """Build video-like metadata for a still-image capture set."""
+    width, height = _probe_image_dimensions(frame_paths[0])
+    info = {
+        "path": str(Path(frame_paths[0]).parent),
+        "width": width,
+        "height": height,
+        "fps": 0.0,
+        "duration": 0.0,
+        "total_frames": len(frame_paths),
+        "rotation": 0,
+        "codec": "image-set",
+        "focal_length_35mm": None,
+    }
+    logger.info(
+        "Image set: %dx%d, %d stills, focal=%.1fmm (35mm equiv)",
+        width,
+        height,
+        len(frame_paths),
+        info["focal_length_35mm"] or 0,
+    )
+    return info
 
 
 # --- Quality scoring ---
@@ -1356,17 +1437,232 @@ def process_video(video_path, output_dir=None, project_root=None,
             pass
 
 
+def process_image_sequence(images_dir, output_dir=None, project_root=None,
+                           min_frames=None, max_frames=None, keep_frames=False,
+                           focal_length=None, config_path=None,
+                           equirectangular=False, equirect_width=4096,
+                           stitcher_backend="openpano"):
+    """Stitch a directory of still images into a panorama."""
+    if project_root is None:
+        project_root = str(Path(__file__).parent)
+    stitcher_binary = os.path.join(project_root, "build", "src", "image-stitching")
+
+    cfg = load_config(config_path)
+    if min_frames is None:
+        min_frames = cfg["frames"]["min_frames"]
+    if max_frames is None:
+        max_frames = cfg["frames"]["max_frames"]
+
+    cleanup_dir = False
+    if output_dir is None:
+        output_dir = tempfile.mkdtemp(prefix="image2pano_")
+        cleanup_dir = not keep_frames
+    else:
+        os.makedirs(output_dir, exist_ok=True)
+
+    timings = {}
+
+    try:
+        t0 = time.time()
+        frame_paths = collect_image_frames(images_dir)
+        source_info = probe_image_sequence(frame_paths)
+        timings["probe_seconds"] = round(time.time() - t0, 2)
+        timings["extract_seconds"] = 0.0
+
+        t0 = time.time()
+        scored, filesize_threshold = score_frames(frame_paths, source_info, cfg)
+        timings["score_seconds"] = round(time.time() - t0, 2)
+
+        t0 = time.time()
+        selected_paths, selected_meta = select_frames(scored, cfg, min_frames, max_frames)
+        timings["select_seconds"] = round(time.time() - t0, 2)
+
+        sharp_count = sum(1 for s in scored if s["is_sharp"])
+        laplacian_values = [s["laplacian"] for s in selected_meta if s["laplacian"] is not None]
+        quality = {
+            "total_frames_extracted": len(frame_paths),
+            "frames_passing_sharpness": sharp_count,
+            "frames_selected": len(selected_paths),
+            "sharpness_pass_rate": round(sharp_count / len(frame_paths), 3) if frame_paths else 0,
+            "filesize_threshold_bytes": filesize_threshold,
+        }
+        if laplacian_values:
+            quality["mean_laplacian"] = round(sum(laplacian_values) / len(laplacian_values), 1)
+            quality["min_laplacian_selected"] = round(min(laplacian_values), 1)
+
+        default_focal = cfg["camera"]["default_focal_length_mm"]
+        focal_mm = focal_length or source_info.get("focal_length_35mm") or default_focal
+        quality["focal_length_35mm"] = focal_mm
+        quality["focal_source"] = ("metadata" if source_info.get("focal_length_35mm") else "default")
+
+        t0 = time.time()
+        stitch_result = None
+        stitch_mode = None
+        vw, vh = source_info["width"], source_info["height"]
+
+        if stitcher_backend == "hugin":
+            stitch_result = run_hugin_stitcher(
+                selected_paths,
+                output_dir,
+                focal_length_mm=focal_mm,
+            )
+            stitch_mode = "hugin"
+        else:
+            focal_known = source_info.get("focal_length_35mm") is not None or focal_length is not None
+            config_kwargs = dict(
+                cfg=cfg,
+                focal_length_mm=focal_mm,
+                video_width=vw,
+                video_height=vh,
+                num_frames=len(selected_paths),
+            )
+
+            if focal_known:
+                modes_to_try = [("cylinder", True), ("estimate_camera", False)]
+            else:
+                modes_to_try = [("estimate_camera", False), ("cylinder", True)]
+
+            for mode_name, use_cyl in modes_to_try:
+                generate_config(output_dir, use_cylinder=use_cyl, **config_kwargs)
+                try:
+                    stitch_result = run_stitcher(
+                        stitcher_binary,
+                        selected_paths,
+                        output_dir,
+                        min_connected=min_frames,
+                    )
+                    stitch_mode = mode_name
+                    break
+                except StitcherError as e:
+                    logger.warning("%s mode failed (%s), trying next mode...",
+                                   mode_name.upper(), e.error_code)
+                    out_file = os.path.join(output_dir, "out.jpg")
+                    if os.path.exists(out_file):
+                        os.remove(out_file)
+
+        if stitch_result is None:
+            raise StitcherError("All stitching modes failed", "STITCH_FAILED")
+
+        timings["stitch_seconds"] = round(time.time() - t0, 2)
+
+        proj_range = stitch_result.get("proj_range")
+        if not proj_range and stitch_mode == "cylinder" and stitch_result["final_size"]:
+            proj_range = compute_cylinder_proj_range(
+                stitch_result["final_size"], vw, vh, focal_mm)
+            if proj_range:
+                logger.info("Cylinder FOV: haov=%.1f°, vaov=%.1f°",
+                    (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi,
+                    (proj_range["max_lat"] - proj_range["min_lat"]) * 180 / math.pi)
+        fov = compute_fov(proj_range)
+
+        final_path = os.path.join(output_dir, "panorama.jpg")
+        equirect_size = None
+
+        haov_deg = (proj_range["max_lon"] - proj_range["min_lon"]) * 180 / math.pi if proj_range else 0
+        do_full_equirect = (
+            equirectangular
+            and proj_range
+            and haov_deg >= FULL_EQUIRECT_MIN_HAOV_DEG
+        )
+
+        if do_full_equirect:
+            equirect_path = os.path.join(output_dir, "panorama_equirect.jpg")
+            equirect_size = format_equirectangular(
+                stitch_result["output_path"], equirect_path, proj_range, equirect_width)
+            if equirect_size:
+                shutil.move(equirect_path, final_path)
+                shutil.move(stitch_result["output_path"],
+                            os.path.join(output_dir, "panorama_cropped.jpg"))
+            else:
+                shutil.move(stitch_result["output_path"], final_path)
+        else:
+            shutil.move(stitch_result["output_path"], final_path)
+
+        warnings = []
+        frames_used = stitch_result.get("frames_used", len(selected_paths))
+        if equirectangular and proj_range and not do_full_equirect:
+            warnings.append(
+                f"Panorama covers {haov_deg:.1f}° horizontally; keeping partial output to avoid a black gap in full 360 export"
+            )
+        if stitcher_backend == "hugin":
+            frames_projected = stitch_result.get("frames_projected", len(selected_paths))
+            if frames_used < frames_projected:
+                warnings.append(
+                    f"Hugin reduced blend input to {frames_used}/{frames_projected} remapped layers "
+                    "to avoid excessive overlap"
+                )
+        elif frames_used < len(selected_paths):
+            warnings.append(
+                f"Only {frames_used}/{len(selected_paths)} frames were stitchable "
+                "(chain broke at a blurry transition)"
+            )
+        quality["frames_stitched"] = frames_used
+        if stitcher_backend == "hugin":
+            quality["frames_projected"] = stitch_result.get("frames_projected", frames_used)
+            quality["frames_blended"] = frames_used
+        if quality["sharpness_pass_rate"] < 0.3:
+            warnings.append(
+                f"{100 - quality['sharpness_pass_rate'] * 100:.0f}% of frames failed sharpness check"
+            )
+        if frames_used < 4:
+            warnings.append("Few still images stitched — panorama may have limited field of view")
+
+        timings["total_seconds"] = round(sum(timings.values()), 2)
+
+        stitch_info = {
+            "final_size": equirect_size or stitch_result["final_size"],
+            "stitched_size": stitch_result["final_size"],
+            "duration_seconds": stitch_result["duration_seconds"],
+            "backend": stitcher_backend,
+            "mode": stitch_mode,
+            "projection": "equirectangular",
+            "coverage_deg": round(haov_deg, 1) if haov_deg else None,
+        }
+        if stitcher_backend == "hugin":
+            stitch_info["frames_projected"] = stitch_result.get("frames_projected")
+            stitch_info["frames_blended"] = frames_used
+        if fov:
+            stitch_info["fov"] = fov
+
+        pannellum = {"type": "equirectangular", "panorama": "panorama.jpg", "autoLoad": True}
+        if fov:
+            if not equirect_size:
+                pannellum["haov"] = fov["haov"]
+                pannellum["vaov"] = fov["vaov"]
+                pannellum["vOffset"] = fov["center_pitch"]
+                if fov["haov"] < 360:
+                    pannellum["minHfov"] = min(50, fov["haov"])
+                    pannellum["maxHfov"] = fov["haov"]
+        stitch_info["pannellum"] = pannellum
+
+        return {
+            "status": "success",
+            "output_path": os.path.abspath(final_path),
+            "video": source_info,
+            "quality": quality,
+            "stitch": stitch_info,
+            "warnings": warnings,
+            "timing": timings,
+        }
+
+    finally:
+        if cleanup_dir and os.path.isdir(output_dir):
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert video to panorama using selectable stitcher backends",
+        description="Convert a video or still-image capture set to a panorama",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Output: JSON result on stdout. Progress on stderr.\n"
                "Exit codes: 0=success, 1=quality too low, 2=input error, "
                "3=stitcher error, 4=internal error"
     )
-    parser.add_argument("video_path", help="Path to input video file")
+    parser.add_argument("input_path", nargs="?", help="Path to input video file or directory of still images")
     parser.add_argument("--output-dir", "-o", help="Output directory (default: auto temp dir)")
     parser.add_argument("--project-root", help="OpenPano project root (default: script directory)")
+    parser.add_argument("--input-mode", choices=("video", "images"), default="video",
+                        help="Interpret input path as a video file or still-image directory (default: video)")
     parser.add_argument("--min-frames", type=int, default=None,
                         help="Minimum sharp frames required (default: from config, usually 8)")
     parser.add_argument("--max-frames", type=int, default=None,
@@ -1397,8 +1693,10 @@ def main():
     result = None
 
     try:
-        result = process_video(
-            video_path=args.video_path,
+        if not args.input_path:
+            raise InputError("Input path is required", "INPUT_NOT_FOUND")
+
+        common_kwargs = dict(
             output_dir=args.output_dir,
             project_root=args.project_root,
             min_frames=args.min_frames,
@@ -1410,6 +1708,16 @@ def main():
             equirect_width=args.equirect_width,
             stitcher_backend=args.stitcher_backend,
         )
+        if args.input_mode == "images":
+            result = process_image_sequence(
+                images_dir=args.input_path,
+                **common_kwargs,
+            )
+        else:
+            result = process_video(
+                video_path=args.input_path,
+                **common_kwargs,
+            )
         exit_code = EXIT_SUCCESS
 
     except QualityError as e:
