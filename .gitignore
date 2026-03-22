@@ -36,3 +36,5 @@ src/cmake_install.cmake
 example-data
 example-data.tgz
 web/jobs/
+web/node_modules/
+web/.next/
