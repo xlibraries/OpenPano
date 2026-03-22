@@ -387,7 +387,7 @@ def _laplacian_variance(image_path):
 def score_frames(frame_paths, video_info, cfg):
     """Score all frames for sharpness.
 
-    Uses file size (fast, adaptive) and Laplacian variance (precise, if cv2 available).
+    Uses Laplacian variance when OpenCV is available, falling back to file size otherwise.
     The file size threshold adapts to scene brightness by using both a resolution-scaled
     minimum and a fraction of the median file size — whichever is lower.
     Returns list of dicts with: path, file_size, laplacian, is_sharp.
@@ -420,22 +420,17 @@ def score_frames(frame_paths, video_info, cfg):
     logger.info("Sharpness threshold: %d bytes (fixed=%d, adaptive=%d, median=%d)",
                 filesize_threshold, fixed_threshold, adaptive_threshold, median_size)
 
-    for s in scores:
-        s["is_sharp"] = s["file_size"] >= filesize_threshold
-
-    # Second pass: Laplacian variance on frames that passed file size check
-    has_cv2 = True
-    sharp_scores = [s for s in scores if s["is_sharp"]]
-    if sharp_scores:
-        first_lap = _laplacian_variance(sharp_scores[0]["path"])
+    has_cv2 = bool(scores)
+    if scores:
+        first_lap = _laplacian_variance(scores[0]["path"])
         if first_lap is None:
             has_cv2 = False
             logger.warning("OpenCV not available, using file-size-only scoring")
 
-    if has_cv2 and sharp_scores:
-        logger.info("Computing Laplacian variance for %d candidate frames...", len(sharp_scores))
+    if has_cv2 and scores:
+        logger.info("Computing Laplacian variance for %d frames...", len(scores))
         laplacian_values = []
-        for s in sharp_scores:
+        for s in scores:
             s["laplacian"] = _laplacian_variance(s["path"])
             laplacian_values.append(s["laplacian"])
 
@@ -444,9 +439,11 @@ def score_frames(frame_paths, video_info, cfg):
         lap_threshold = median_lap * qcfg["laplacian_ratio_threshold"]
         logger.info("Laplacian threshold: %.1f (median=%.1f)", lap_threshold, median_lap)
 
-        for s in sharp_scores:
-            if s["laplacian"] < lap_threshold:
-                s["is_sharp"] = False
+        for s in scores:
+            s["is_sharp"] = s["laplacian"] >= lap_threshold
+    else:
+        for s in scores:
+            s["is_sharp"] = s["file_size"] >= filesize_threshold
 
     total_sharp = sum(1 for s in scores if s["is_sharp"])
     pass_rate = total_sharp / len(scores) if scores else 0
@@ -741,14 +738,35 @@ def format_equirectangular(input_path, output_path, proj_range, equirect_width=4
         logger.error("Failed to read panorama: %s", input_path)
         return None
 
+    min_lon, max_lon = proj_range["min_lon"], proj_range["max_lon"]
+    min_lat, max_lat = proj_range["min_lat"], proj_range["max_lat"]
     pano_h, pano_w = pano.shape[:2]
+
+    # Avoid shrinking the stitched panorama when embedding it into a full 2:1 canvas.
+    # The input is already in spherical/equirectangular space, so an unnecessary resize
+    # here discards detail that the stitcher already recovered.
+    haov = max(1e-6, max_lon - min_lon)
+    vaov = max(1e-6, max_lat - min_lat)
+    min_full_width = max(
+        int(equirect_width),
+        math.ceil(pano_w * (2 * math.pi) / haov),
+        math.ceil(pano_h * (2 * math.pi) / vaov),
+    )
+    if min_full_width % 2:
+        min_full_width += 1
+    if min_full_width > equirect_width:
+        logger.info(
+            "Increasing full equirect width from %d to %d to preserve stitched resolution",
+            equirect_width,
+            min_full_width,
+        )
+        equirect_width = min_full_width
+
     equirect_h = equirect_width // 2  # 2:1 aspect
 
     # Full equirectangular: longitude [-pi, pi] → x [0, equirect_width]
     #                       latitude  [pi/2, -pi/2] → y [0, equirect_h]  (top=north)
     # Map projection range to pixel coordinates in the full canvas
-    min_lon, max_lon = proj_range["min_lon"], proj_range["max_lon"]
-    min_lat, max_lat = proj_range["min_lat"], proj_range["max_lat"]
 
     # Longitude to x: x = (lon + pi) / (2*pi) * width
     x_start = int((min_lon + math.pi) / (2 * math.pi) * equirect_width)
@@ -977,6 +995,8 @@ def process_video(video_path, output_dir=None, project_root=None,
                 # Partial panorama — tell Pannellum the actual FOV
                 pannellum["haov"] = fov["haov"]
                 pannellum["vaov"] = fov["vaov"]
+                pannellum["vOffset"] = fov["center_pitch"]
+                pannellum["avoidShowingBackground"] = True
                 if fov["haov"] < 360:
                     pannellum["minHfov"] = min(50, fov["haov"])
                     pannellum["maxHfov"] = fov["haov"]
@@ -1022,7 +1042,7 @@ def main():
     parser.add_argument("--config", "-c", default=None,
                         help="Path to video2pano.conf (default: video2pano.conf next to this script)")
     parser.add_argument("--equirectangular", "-e", action="store_true",
-                        help="Output as full 2:1 equirectangular image (for 360 viewers like Pannellum)")
+                        help="Output as full 2:1 equirectangular image (best for true 360 export workflows)")
     parser.add_argument("--equirect-width", type=int, default=4096,
                         help="Width of full equirectangular output (default: 4096, height=width/2)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep extracted frames after stitching")

@@ -18,7 +18,8 @@ app = Flask(__name__)
 # --- Configuration via environment variables ---
 ENGINE_PYTHON = os.environ.get("ENGINE_PYTHON", "python3")
 ENGINE_SCRIPT = os.environ.get("ENGINE_SCRIPT")  # Required: path to video2pano.py
-ENGINE_ROOT = os.environ.get("ENGINE_ROOT")  # Optional: --project-root for engine
+_engine_root = os.environ.get("ENGINE_ROOT")  # Optional: --project-root for engine
+ENGINE_ROOT = os.path.abspath(_engine_root) if _engine_root else None
 JOBS_DIR = os.environ.get(
     "JOBS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
 )

@@ -16,8 +16,11 @@ find_package(Eigen3 REQUIRED)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third-party/)
 
-add_definitions(${EIGEN3_DEFINITIONS})
-include_directories(${EIGEN3_INCLUDE_DIRS})
+include_directories(${EIGEN3_INCLUDE_DIR})
+if(TARGET Eigen3::Eigen)
+	get_target_property(EIGEN3_INCLUDE_DIR Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+	include_directories(${EIGEN3_INCLUDE_DIR})
+endif()
 
 # find sources
 file(GLOB SOURCES feature/*.cc stitch/*.cc lib/*.cc)

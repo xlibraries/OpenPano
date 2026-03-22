@@ -162,7 +162,7 @@ pip3 install opencv-python   # optional but recommended
 
 The pipeline automatically:
 - Adapts SIFT parameters for the video's resolution
-- Detects and rejects blurry frames (file size + Laplacian variance)
+- Detects and rejects blurry frames (Laplacian variance when OpenCV is available, file-size fallback otherwise)
 - Selects optimally-spaced sharp frames
 - Tries the best stitching mode (ESTIMATE_CAMERA for unknown focal length, CYLINDER when focal is known)
 - Falls back to alternate mode if the first fails
