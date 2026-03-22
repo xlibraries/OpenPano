@@ -12,7 +12,7 @@ backend/.env
 
 # Frontend
 frontend/node_modules/
-frontend/.next/
+frontend/dist/
 frontend/.env.local
 
 # General
