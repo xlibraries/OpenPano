@@ -1,0 +1,177 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+
+header {
+    text-align: center;
+    padding: 1.5rem 1rem 1rem;
+    background: #16213e;
+    border-bottom: 2px solid #0f3460;
+}
+header h1 { font-size: 1.8rem; color: #e94560; letter-spacing: 1px; }
+header p { color: #a0a0b0; font-size: 0.95rem; margin-top: 0.3rem; }
+
+main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+/* Upload */
+#drop-zone {
+    border: 2px dashed #0f3460;
+    border-radius: 12px;
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+#drop-zone:hover, #drop-zone.drag-over {
+    border-color: #e94560;
+    background: rgba(233, 69, 96, 0.05);
+}
+.drop-icon { font-size: 3rem; color: #0f3460; margin-bottom: 0.5rem; }
+.drop-title { font-size: 1.2rem; margin-bottom: 0.5rem; }
+.drop-or { color: #666; margin: 0.5rem 0; }
+.file-btn {
+    display: inline-block;
+    padding: 0.6rem 1.5rem;
+    background: #e94560;
+    color: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background 0.2s;
+}
+.file-btn:hover { background: #c73550; }
+.drop-hint { color: #666; font-size: 0.8rem; margin-top: 1rem; }
+
+#upload-progress { margin-top: 1.5rem; text-align: center; }
+#upload-percent { display: block; margin-top: 0.5rem; color: #a0a0b0; }
+
+.error-msg { color: #e94560; text-align: center; margin-top: 1rem; font-size: 0.95rem; }
+
+/* Progress bar */
+.progress-bar {
+    width: 100%;
+    height: 8px;
+    background: #0f3460;
+    border-radius: 4px;
+    overflow: hidden;
+}
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #e94560, #f06292);
+    border-radius: 4px;
+    transition: width 0.4s ease;
+}
+
+/* Processing */
+#processing-section { text-align: center; }
+#processing-section h2 { margin-bottom: 1.5rem; color: #e94560; }
+.processing-card {
+    background: #16213e;
+    border-radius: 10px;
+    padding: 2rem;
+    max-width: 600px;
+    margin: 0 auto;
+}
+#stage-label { font-size: 1.1rem; margin-bottom: 1rem; }
+.detail-text { color: #888; font-size: 0.8rem; margin-top: 0.8rem; word-break: break-all; }
+#elapsed-time { color: #a0a0b0; margin-top: 0.8rem; font-size: 0.9rem; }
+
+/* Viewer */
+#panorama-viewer {
+    width: 100%;
+    height: 70vh;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #000;
+}
+
+#info-bar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+#controls-panel, #metadata-panel {
+    background: #16213e;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+}
+#controls-panel h3, #metadata-panel h3 {
+    font-size: 0.95rem;
+    color: #e94560;
+    margin-bottom: 0.8rem;
+}
+
+.control-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.6rem;
+    font-size: 0.9rem;
+}
+.control-row label { white-space: nowrap; }
+.control-row input[type="range"] { flex: 1; accent-color: #e94560; }
+.control-row.buttons { gap: 0.5rem; margin-top: 0.8rem; }
+.control-row button, #new-pano-btn, #error-retry-btn {
+    padding: 0.5rem 1rem;
+    background: #0f3460;
+    color: #e0e0e0;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background 0.2s;
+}
+.control-row button:hover, #new-pano-btn:hover, #error-retry-btn:hover {
+    background: #e94560;
+}
+
+#meta-content { font-size: 0.85rem; line-height: 1.6; color: #c0c0d0; }
+#meta-content strong { color: #e0e0e0; }
+
+#warnings-panel {
+    background: rgba(233, 69, 96, 0.1);
+    border: 1px solid #e94560;
+    border-radius: 8px;
+    padding: 0.8rem 1.2rem;
+    margin-top: 1rem;
+    font-size: 0.85rem;
+    color: #f0a0b0;
+}
+
+#new-pano-btn {
+    display: block;
+    margin: 1.5rem auto 0;
+    padding: 0.7rem 2rem;
+    font-size: 1rem;
+}
+
+/* Error */
+.error-card {
+    text-align: center;
+    background: #16213e;
+    border-radius: 10px;
+    padding: 2rem;
+    max-width: 600px;
+    margin: 0 auto;
+}
+.error-card h2 { color: #e94560; margin-bottom: 1rem; }
+.error-card p { color: #c0c0d0; margin-bottom: 1.5rem; line-height: 1.5; }
+
+/* Responsive */
+@media (max-width: 700px) {
+    #info-bar { grid-template-columns: 1fr; }
+    #panorama-viewer { height: 50vh; }
+    .processing-card { padding: 1.2rem; }
+}
