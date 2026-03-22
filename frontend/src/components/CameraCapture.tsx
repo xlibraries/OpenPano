@@ -69,6 +69,15 @@ export default function CameraCapture({ onJobStarted, onCancel }: CameraCaptureP
   // ── camera ────────────────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
     setCameraError(null);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError(
+        "Camera access requires a secure connection (HTTPS). " +
+        "Please open this page over HTTPS or on localhost."
+      );
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -80,11 +89,31 @@ export default function CameraCapture({ onJobStarted, onCancel }: CameraCaptureP
         videoRef.current.play();
       }
     } catch (e) {
-      setCameraError(
-        e instanceof Error && e.name === "NotAllowedError"
-          ? "Camera permission denied. Please allow camera access and try again."
-          : "Could not open camera. Make sure your device has a camera."
-      );
+      if (e instanceof Error) {
+        if (e.name === "NotAllowedError" || e.name === "PermissionDeniedError") {
+          setCameraError(
+            "Camera permission was denied. Please allow camera access in your browser settings and try again."
+          );
+        } else if (e.name === "NotFoundError" || e.name === "DevicesNotFoundError") {
+          setCameraError("No camera found on this device.");
+        } else if (e.name === "NotReadableError" || e.name === "TrackStartError") {
+          setCameraError("Camera is already in use by another app. Close it and try again.");
+        } else if (e.name === "OverconstrainedError") {
+          // Retry without constraints
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            streamRef.current = stream;
+            if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play(); }
+            return;
+          } catch {
+            setCameraError("Could not start camera with the requested settings.");
+          }
+        } else {
+          setCameraError(`Could not start camera: ${e.message}`);
+        }
+      } else {
+        setCameraError("An unexpected error occurred while accessing the camera.");
+      }
     }
   }, []);
 
