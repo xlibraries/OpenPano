@@ -294,6 +294,20 @@ def _focal_mm_to_hfov_deg(focal_length_mm):
     return math.degrees(2.0 * math.atan(36.0 / (2.0 * focal_length_mm)))
 
 
+def _evenly_spaced_subset(items, max_items):
+    """Return up to max_items elements sampled evenly across the input list."""
+    if len(items) <= max_items:
+        return list(items)
+
+    last_index = len(items) - 1
+    indices = []
+    for i in range(max_items):
+        idx = round(i * last_index / (max_items - 1))
+        if not indices or idx > indices[-1]:
+            indices.append(idx)
+    return [items[idx] for idx in indices]
+
+
 # --- Video probing ---
 
 def probe_video(video_path):
@@ -801,6 +815,7 @@ def run_hugin_stitcher(frame_paths, working_dir, focal_length_mm=None):
     output_file = os.path.join(working_dir, "hugin_out.jpg")
 
     t0 = time.time()
+    original_frame_count = len(frame_paths)
 
     logger.info("Hugin project: generating project for %d frames...", len(frame_paths))
     pto_cmd = [hugin_tools["pto_gen"], "-o", project_0]
@@ -862,13 +877,13 @@ def run_hugin_stitcher(frame_paths, working_dir, focal_length_mm=None):
     remaps_used = len(remap_files)
     blend_stdout = ""
     blend_stderr = ""
-    for step in (1, 2, 3, 4):
-        subset = remap_files[::step]
+    for max_layers in (len(remap_files), 32, 28, 24):
+        subset = _evenly_spaced_subset(remap_files, max_layers)
         remaps_used = len(subset)
         logger.info(
             "Hugin blend: blending %d remapped layers with enblend%s...",
             remaps_used,
-            "" if step == 1 else f" (retry every {step}th layer)",
+            "" if remaps_used == len(remap_files) else f" (retry with evenly spaced subset)",
         )
         result = subprocess.run(
             [hugin_tools["enblend"], "-o", blended_tif, *subset],
@@ -881,7 +896,7 @@ def run_hugin_stitcher(frame_paths, working_dir, focal_length_mm=None):
         if result.returncode == 0:
             break
         combined = blend_stdout + blend_stderr
-        if "excessive image overlap detected" in combined and step < 4:
+        if "excessive image overlap detected" in combined and remaps_used > 24:
             logger.warning(
                 "Hugin blend reported excessive overlap with %d layers; retrying with sparser subset...",
                 remaps_used,
@@ -927,6 +942,8 @@ def run_hugin_stitcher(frame_paths, working_dir, focal_length_mm=None):
         "proj_range": proj_range,
         "duration_seconds": round(duration, 2),
         "frames_used": remaps_used,
+        "frames_input": original_frame_count,
+        "frames_projected": len(frame_paths),
         "blend_output": (blend_stdout + blend_stderr)[-4000:],
     }
 
@@ -1246,18 +1263,22 @@ def process_video(video_path, output_dir=None, project_root=None,
         # Collect warnings
         warnings = []
         frames_used = stitch_result.get("frames_used", len(selected_paths))
-        if frames_used < len(selected_paths):
-            if stitcher_backend == "hugin":
+        if stitcher_backend == "hugin":
+            frames_projected = stitch_result.get("frames_projected", len(selected_paths))
+            if frames_used < frames_projected:
                 warnings.append(
-                    f"Hugin reduced blend input to {frames_used}/{len(selected_paths)} layers "
+                    f"Hugin reduced blend input to {frames_used}/{frames_projected} remapped layers "
                     "to avoid excessive overlap"
                 )
-            else:
-                warnings.append(
-                    f"Only {frames_used}/{len(selected_paths)} frames were stitchable "
-                    "(chain broke at a blurry transition)"
-                )
+        elif frames_used < len(selected_paths):
+            warnings.append(
+                f"Only {frames_used}/{len(selected_paths)} frames were stitchable "
+                "(chain broke at a blurry transition)"
+            )
         quality["frames_stitched"] = frames_used
+        if stitcher_backend == "hugin":
+            quality["frames_projected"] = stitch_result.get("frames_projected", frames_used)
+            quality["frames_blended"] = frames_used
         if quality["sharpness_pass_rate"] < 0.3:
             warnings.append(
                 f"{100 - quality['sharpness_pass_rate'] * 100:.0f}% of frames failed sharpness check"
@@ -1276,6 +1297,9 @@ def process_video(video_path, output_dir=None, project_root=None,
             "mode": stitch_mode,
             "projection": "equirectangular",
         }
+        if stitcher_backend == "hugin":
+            stitch_info["frames_projected"] = stitch_result.get("frames_projected")
+            stitch_info["frames_blended"] = frames_used
         if fov:
             stitch_info["fov"] = fov
 
