@@ -112,7 +112,7 @@ def stitch_from_metadata(
     stills_dir: str,
     output_path: str,
     width: int = 4096,
-    default_fov_deg: float = 65.0,
+    default_fov_deg: float = 77.0.0,
     chunk_rows: int = 256,
 ) -> dict:
     """Stitch a PanoCraft photo-sphere capture into an equirectangular panorama.
@@ -169,7 +169,7 @@ def stitch_from_metadata(
         # Use capturedVector — actual capture direction, so content in the
         # blend zone of adjacent shots shows the same physical area from the
         # same actual angle, giving clean cross-fades without ghosting.
-        cv = shot.get("capturedVector") or shot.get("targetVector", {})
+        cv = shot.get("targetVector") or shot.get("capturedVector", {})
         fwd_vec = [cv.get("x", 0.0), cv.get("y", 0.0), cv.get("z", 1.0)]
 
         # Find image
